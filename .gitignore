@@ -4,3 +4,4 @@ node_modules/
 *.tsbuildinfo
 package-lock.json
 *.vsix
+.vscode/.enscript-cache.json

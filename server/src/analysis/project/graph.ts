@@ -699,7 +699,7 @@ export class Analyzer {
                         end:   { line: err.line - 1, character: err.column     }
                     },
                     severity: DiagnosticSeverity.Error,
-                    source: 'enfusion-script'
+                    source: 'enscript'
                 };
                 const stub: File = { body: [], version: doc.version, diagnostics: [parseErrorDiag] };
                 this.docCache.set(normalizeUri(doc.uri), stub);
