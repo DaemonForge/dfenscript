@@ -35,7 +35,7 @@ export function activateDayzCppDiagnostics(context: vscode.ExtensionContext): vo
             if (value.includes('\\\\')) {
                 diagnostics.push(new vscode.Diagnostic(
                     range,
-                    'DayZ config path likely contains double backslashes. Use single backslashes in config.cpp/mod.cpp paths (example: "\\dz\\weapons\\...").',
+                    'DayZ config path likely contains double backslashes. Use single backslashes in config.cpp paths (example: "\\dz\\weapons\\...").',
                     vscode.DiagnosticSeverity.Warning
                 ));
             }
