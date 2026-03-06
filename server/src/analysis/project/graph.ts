@@ -5441,7 +5441,9 @@ export class Analyzer {
         overloads: FunctionDeclNode[],
         argTypes: (string | null)[],
         argCount: number,
-        funcName: string
+        funcName: string,
+        argStrings?: string[],
+        ast?: File
     ): { message: string; severity: 'error' | 'warning' } | null {
         if (overloads.length === 0) return null; // No declarations found, skip
         
@@ -5484,22 +5486,60 @@ export class Analyzer {
             
             for (let i = 0; i < argCount; i++) {
                 const argType = argTypes[i];
+                
+                const param = params[i];
+                if (!param?.type?.identifier) {
+                    if (!argType) continue;
+                    // param has no type info but argType exists — skip
+                    continue;
+                }
+                
+                const paramType = param.type.identifier;
+                
+                // typename params: the argument should be a class/type *name*, not a value.
+                // Validate that the identifier is a known type and that it's accessible
+                // from the current module. This must come BEFORE the argType null check
+                // because bare class names (e.g., ItemMap) aren't variables, so
+                // inferArgType returns null for them.
+                if (paramType === 'typename') {
+                    const rawArg = argStrings?.[i]?.trim();
+                    if (!rawArg || !/^\w+$/.test(rawArg)) continue; // Complex expression, skip
+                    
+                    // Check if the identifier is a known class, enum, or typedef
+                    const isKnownType = this.classIndex.has(rawArg)
+                        || this.enumIndex.has(rawArg)
+                        || this.typedefIndex.has(rawArg);
+                    
+                    if (!isKnownType) {
+                        // Don't flag as type mismatch — it might be an unindexed type.
+                        // The checkUnknownSymbols pass handles "unknown type" warnings.
+                        continue;
+                    }
+                    
+                    // Type exists — check cross-module accessibility
+                    const currentModule = ast?.module || 0;
+                    if (currentModule > 0) {
+                        const typeModule = this.getModuleForSymbol(rawArg);
+                        if (typeModule > 0 && typeModule > currentModule) {
+                            typeMismatch = true;
+                            mismatchMsg = `Argument ${i + 1}: type '${rawArg}' is defined in ${MODULE_NAMES[typeModule] || 'module ' + typeModule} and cannot be used from ${MODULE_NAMES[currentModule] || 'module ' + currentModule}. Higher-numbered modules are not visible to lower-numbered modules.`;
+                            break;
+                        }
+                    }
+                    continue;
+                }
+                
                 if (!argType) continue; // Couldn't resolve arg type, skip this param
                 
                 // Skip void arg types — typically a function reference (method without parens)
                 // rather than a meaningful value, so type checking would be misleading
                 if (argType === 'void') continue;
                 
-                const param = params[i];
-                if (!param?.type?.identifier) continue;
-                
-                const paramType = param.type.identifier;
-                
-                // Skip auto/typename/Class/void/func params - they accept anything
+                // Skip auto/Class/void/func params - they accept anything
                 // In Enforce Script, void parameters are generic "any type" placeholders,
                 // and func/function params accept function references which look like identifiers.
                 // Also skip container types (array, set, map) since we don't compare generics yet.
-                if (paramType === 'auto' || paramType === 'typename' || paramType === 'Class' || paramType === 'Managed' || paramType === 'void' || paramType === 'func' || paramType === 'function' || paramType === 'array' || paramType === 'set' || paramType === 'map') continue;
+                if (paramType === 'auto' || paramType === 'Class' || paramType === 'Managed' || paramType === 'void' || paramType === 'func' || paramType === 'function' || paramType === 'array' || paramType === 'set' || paramType === 'map') continue;
                 
                 // Skip out/inout params - their types flow differently
                 if (param.modifiers?.includes('out') || param.modifiers?.includes('inout')) continue;
@@ -5863,7 +5903,7 @@ export class Analyzer {
             );
             
             // Validate against overloads
-            const result = this.validateCallAgainstOverloads(overloads, argTypes, argCount, funcName);
+            const result = this.validateCallAgainstOverloads(overloads, argTypes, argCount, funcName, argStrings, ast);
             if (result) {
                 const startPos = doc.positionAt(match.index);
                 const endPos = doc.positionAt(pos - 1); // end of closing paren
@@ -6290,6 +6330,7 @@ export class Analyzer {
                 }
             }
         }
+
     }
 
     private toSymbolKindName(kind: string): SymbolEntry['kind'] {
