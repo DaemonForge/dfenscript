@@ -6261,7 +6261,7 @@ export class Analyzer {
                     diags.push({
                         message: `Type '${type.identifier}' is defined in ${MODULE_NAMES[typeModule] || 'module ' + typeModule} and cannot be used from ${MODULE_NAMES[currentModule] || 'module ' + currentModule}. Higher-numbered modules are not visible to lower-numbered modules.`,
                         range: { start: type.start, end: type.end },
-                        severity: DiagnosticSeverity.Warning
+                        severity: DiagnosticSeverity.Error
                     });
                 }
             }
@@ -6291,7 +6291,7 @@ export class Analyzer {
                         diags.push({
                             message: `Base class '${classNode.base.identifier}' is defined in ${MODULE_NAMES[baseModule] || 'module ' + baseModule} and cannot be extended from ${MODULE_NAMES[currentModule] || 'module ' + currentModule}. Higher-numbered modules are not visible to lower-numbered modules.`,
                             range: { start: classNode.base.start, end: classNode.base.end },
-                            severity: DiagnosticSeverity.Warning
+                            severity: DiagnosticSeverity.Error
                         });
                     }
                 }
