@@ -73,7 +73,7 @@
             "properties": {
                 "enscript.includePaths": {
                     "type": "array",
-                    "scope": "resource",
+                    "scope": "window",
                     "default": ["P:\\scripts"],
                     "description": "List of paths to index for base game data (e.g. P:\\scripts\\ folder)",
                     "items": {
@@ -82,7 +82,7 @@
                 },
                 "enscript.preprocessorDefines": {
                     "type": "array",
-                    "scope": "resource",
+                    "scope": "window",
                     "default": [],
                     "description": "List of preprocessor symbols to treat as defined. When set, #ifdef blocks for these symbols will be processed instead of skipped (e.g. [\"ENF_DONE\"] to include proto declarations guarded by #ifdef ENF_DONE).",
                     "items": {
