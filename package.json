@@ -2,7 +2,7 @@
     "name": "df-enscript",
     "displayName": "DaemonForge Enfusion Script",
     "description": "DaemonForge fork of Enfusion Script — Enforce/Enscript language support, diagnostics, and DayZ game‑specific tooling.",
-    "version": "0.2.0",
+    "version": "0.2.1",
     "publisher": "DaemonForge",
     "icon": "media/dflogo.png",
     "engines": {
