@@ -2,7 +2,7 @@
     "name": "df-enscript",
     "displayName": "DaemonForge Enfusion Script",
     "description": "DaemonForge fork of Enfusion Script — Enforce/Enscript language support, diagnostics, and DayZ game‑specific tooling.",
-    "version": "0.2.0",
+    "version": "0.2.1",
     "publisher": "DaemonForge",
     "icon": "media/dflogo.png",
     "engines": {
@@ -73,6 +73,7 @@
             "properties": {
                 "enscript.includePaths": {
                     "type": "array",
+                    "scope": "window",
                     "default": ["P:\\scripts"],
                     "description": "List of paths to index for base game data (e.g. P:\\scripts\\ folder)",
                     "items": {
@@ -81,6 +82,7 @@
                 },
                 "enscript.preprocessorDefines": {
                     "type": "array",
+                    "scope": "window",
                     "default": [],
                     "description": "List of preprocessor symbols to treat as defined. When set, #ifdef blocks for these symbols will be processed instead of skipped (e.g. [\"ENF_DONE\"] to include proto declarations guarded by #ifdef ENF_DONE).",
                     "items": {

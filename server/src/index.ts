@@ -37,10 +37,11 @@ connection.onInitialize((_params: InitializeParams): InitializeResult => {
         capabilities: {
             textDocumentSync: TextDocumentSyncKind.Incremental,
             completionProvider: { resolveProvider: false, triggerCharacters: ['.', '>', ':'] },
+            signatureHelpProvider: { triggerCharacters: ['(', ','] },
             definitionProvider: true,
             hoverProvider: true,
             referencesProvider: true,
-            renameProvider: true,
+            renameProvider: { prepareProvider: true },
             workspaceSymbolProvider: true
         }
     };

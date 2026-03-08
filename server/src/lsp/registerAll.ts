@@ -5,6 +5,7 @@ import { registerDefinition } from './handlers/definition';
 import { registerHover } from './handlers/hover';
 import { registerReferences } from './handlers/references';
 import { registerRename } from './handlers/rename';
+import { registerSignatureHelp } from './handlers/signatureHelp';
 import { registerWorkspaceSymbol } from './handlers/workspaceSymbol';
 import { registerDiagnostics } from './handlers/diagnostics';
 import { registerDumpDiagnostics } from './handlers/dumpDiagnostics';
@@ -16,6 +17,7 @@ export function registerAllHandlers(conn: Connection, docs: TextDocuments<TextDo
     registerHover(conn, docs);
     registerReferences(conn, docs);
     registerRename(conn, docs);
+    registerSignatureHelp(conn, docs);
     registerWorkspaceSymbol(conn, docs);
     registerDiagnostics(conn, docs);
     registerDumpDiagnostics(conn, docs);
