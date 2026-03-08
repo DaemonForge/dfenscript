@@ -1,5 +1,5 @@
 import { Diagnostic, DiagnosticSeverity } from 'vscode-languageserver';
-import { ClassDeclNode, FunctionDeclNode, VarDeclNode, File } from '../ast/parser';
+import { ClassDeclNode, File } from '../ast/parser';
 
 /**
  * Base interface for all diagnostic rules.
