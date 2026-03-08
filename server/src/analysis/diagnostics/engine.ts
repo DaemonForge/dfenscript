@@ -1,6 +1,6 @@
 import { Diagnostic, DiagnosticSeverity } from 'vscode-languageserver';
 import { DiagnosticRule, RuleContext } from './rules';
-import { File, ClassDeclNode, FunctionDeclNode, VarDeclNode } from '../ast/parser';
+import { File, ClassDeclNode, FunctionDeclNode } from '../ast/parser';
 
 /**
  * Pluggable Diagnostic Rule Engine

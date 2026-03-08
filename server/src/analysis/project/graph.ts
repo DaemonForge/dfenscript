@@ -3157,17 +3157,6 @@ export class Analyzer {
             results.push({ uri, range: { start, end } });
         };
 
-        // Helper: check if a definition at given position matches our target
-        const matchesDefinition = (refDoc: TextDocument, refPos: Position): boolean => {
-            const refDefs = this.resolveDefinitions(refDoc, refPos);
-            for (const refDef of refDefs) {
-                const refUri = (refDef as any)._sourceUri || refDef.uri;
-                const key = `${refUri}:${refDef.nameStart.line}:${refDef.nameStart.character}`;
-                if (definitionKeys.has(key)) return true;
-            }
-            return false;
-        };
-
         // If includeDeclaration, add the definition locations first
         if (includeDeclaration) {
             for (const def of definitions) {
@@ -3436,11 +3425,14 @@ export class Analyzer {
         if (!funcNameMatch) return null;
         
         const funcName = funcNameMatch[1];
-        const funcNameStart = parenOffset - funcNameMatch[0].length + funcNameMatch.index! - (textBefore.length - funcNameMatch[0].length - (textBefore.length - parenOffset));
         
-        // Resolve the function — use resolveDefinitions at the function name position
-        const funcNameOffset = parenOffset - (funcNameMatch[0].length - funcNameMatch[0].trimStart().length) - funcName.length;
-        const funcPos = doc.positionAt(funcNameOffset + Math.floor(funcName.length / 2));
+        // Resolve the function — use resolveDefinitions at a position within the function name.
+        // funcNameMatch.index! is the offset of the match start relative to textBefore, which
+        // starts at position 0, so it is also an absolute document offset.  Adding half the name
+        // length reliably lands inside the identifier even when there is whitespace between the
+        // name and the opening parenthesis (e.g. "Foo  (").
+        const funcNameOffset = funcNameMatch.index! + Math.floor(funcName.length / 2);
+        const funcPos = doc.positionAt(funcNameOffset);
         
         const definitions = this.resolveDefinitions(doc, funcPos);
         if (definitions.length === 0) return null;
