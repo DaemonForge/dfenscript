@@ -10,7 +10,9 @@ export async function findAllFiles(dir: string, extensions: string[], files: str
 
     for (const entry of entries) {
         const fullPath = path.join(dir, entry.name);
-        if (entry.isDirectory()) {
+        // isDirectory() returns false for symlinks — also check isSymbolicLink()
+        const isDir = entry.isDirectory() || (entry.isSymbolicLink() && await fs.stat(fullPath).then(s => s.isDirectory(), () => false));
+        if (isDir) {
             // Skip node_modules, .git, and other non-script directories
             if (entry.name === 'node_modules' || entry.name === '.git' || entry.name === '.svn') {
                 continue;
