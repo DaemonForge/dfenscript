@@ -449,7 +449,12 @@ export function parse(
                 genericVars = [];
 
                 while (peek().value !== '>' && !eof()) {
-                    expect('Class');
+                    // Accept both 'Class' and 'typename' as generic type constraints
+                    // Enforce Script supports both: class Foo<Class T> and class Foo<typename T>
+                    const constraintTok = peek();
+                    if (constraintTok.value === 'Class' || constraintTok.value === 'typename') {
+                        next();
+                    }
                     genericVars.push(expectIdentifier().value);
                     if (peek().value === ',') next();
                 }

@@ -427,6 +427,10 @@ class B { float y; };`;
 
 test('playground', () => {
     const target_file = path.join("P:\\enscript\\test", "test_enscript.c");
+    if (!fs.existsSync(target_file)) {
+        // Skip when the local playground file is not available
+        return;
+    }
     const text = fs.readFileSync(target_file, "utf8");
     const doc = TextDocument.create(url.pathToFileURL(target_file).href, 'enscript', 1, text);
     const ast = parse(doc);

@@ -43,14 +43,17 @@ export function registerCompletion(
     const analyser = Analyzer.instance();
     const items = analyser.getCompletions(doc, params.position);
 
-    return items.map(i => ({
-      label: (i as any).name,
-      kind: convertKind((i as any).kind),
-      detail: (i as any).detail,
-      insertText: (i as any).insertText || (i as any).name,
-      // If it's a function with params, place cursor inside parens
-      insertTextFormat: InsertTextFormat.PlainText
-    }));
+    return items.map(i => {
+      const item = i as any;
+      const hasSnippet = !!item.snippetText;
+      return {
+        label: item.name,
+        kind: convertKind(item.kind),
+        detail: item.detail,
+        insertText: hasSnippet ? item.snippetText : (item.insertText || item.name),
+        insertTextFormat: hasSnippet ? InsertTextFormat.Snippet : InsertTextFormat.PlainText
+      };
+    });
   });
 }
 

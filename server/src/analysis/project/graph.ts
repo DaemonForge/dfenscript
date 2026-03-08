@@ -43,6 +43,7 @@ import { prettyPrint } from '../ast/printer';
 import { Token, TokenKind } from '../lexer/token';
 import { keywords } from '../lexer/rules';
 import { normalizeUri } from '../../util/uri';
+import { DiagnosticEngine } from '../diagnostics/engine';
 import * as url from 'node:url';
 
 interface SymbolEntry {
@@ -64,7 +65,9 @@ interface CompletionResult {
     kind: string;
     detail?: string;
     insertText?: string;
+    snippetText?: string;  // Snippet format (e.g., "Func(${1:param1}, ${2:param2})")
     returnType?: string;
+    parameters?: { name: string; type: string }[];  // For signatureHelp
 }
 
 /**
@@ -239,6 +242,7 @@ export class Analyzer {
     private docCache = new Map<string, File>();
     private parseErrorCount = 0;
     private preprocessorDefines: Set<string> = new Set();
+    private diagnosticEngine = new DiagnosticEngine();
     
     // ================================================================
     // GLOBAL SYMBOL INDEX for fast completions
@@ -964,7 +968,11 @@ export class Analyzer {
         
         // Regex fallbacks for cases the AST-based lookup misses
         // (e.g., variables in unparsed regions)
-        const text = doc.getText();
+        // Strip comments to prevent matching identifiers inside comment text.
+        // Replace with spaces to preserve character positions.
+        const text = doc.getText()
+            .replace(/\/\/.*$/gm, m => ' '.repeat(m.length))
+            .replace(/\/\*[\s\S]*?\*\//g, m => m.replace(/[^\n]/g, ' '));
         const regexKeywords = new Set(['if', 'while', 'for', 'switch', 'return', 'new', 'delete', 'class', 'enum', 'else', 'foreach', 'void', 'override', 'static', 'private', 'protected', 'const', 'ref', 'autoptr', 'proto', 'native', 'modded', 'sealed', 'event', 'typedef', 'case', 'break', 'continue', 'this', 'super', 'null', 'true', 'false', 'out', 'inout', 'volatile']);
         
         // Pattern: Type varName; or Type varName = or Type varName[  (C-style array)
@@ -1042,8 +1050,10 @@ export class Analyzer {
             // Then walk the class hierarchy via classIndex for inherited members
             const classHierarchy = this.getClassHierarchyOrdered(containingClass.name, new Set());
             for (const classNode of classHierarchy) {
-                // Skip self — already searched above via the local AST
-                if (classNode.name === containingClass.name) continue;
+                // Skip the exact class node already searched above via the local AST.
+                // Use reference comparison (not name) so that modded classes don't
+                // accidentally skip the original class which shares the same name.
+                if (classNode === containingClass) continue;
                 for (const member of classNode.members || []) {
                     if (member.kind === 'VarDecl' && member.name === varName && (member as VarDeclNode).type) {
                         return (member as VarDeclNode).type!;
@@ -1208,11 +1218,17 @@ export class Analyzer {
         const visited = new Set<string>();
         const classesToSearch = this.getClassHierarchyOrdered(resolvedClass, visited);
         
-        // Search class members FIRST — a field or method on the target class takes
+        // Search in REVERSE order (most-derived first: modded → original → parent)
+        // so that if a modded class overrides a method's return type, we pick that up
+        // rather than the parent's version. This is critical for correct type inference
+        // when mods change return types of overridden methods.
+        //
+        // Also: search class members FIRST — a field or method on the target class takes
         // priority over a global constructor with the same name.  This prevents
         // e.g. `marker.Icon` (a string field named "Icon") from being resolved as
         // the constructor of a class called "Icon".
-        for (const classNode of classesToSearch) {
+        for (let i = classesToSearch.length - 1; i >= 0; i--) {
+            const classNode = classesToSearch[i];
             for (const member of classNode.members || []) {
                 if (member.kind === 'FunctionDecl' && member.name === methodName) {
                     const func = member as FunctionDeclNode;
@@ -2358,8 +2374,13 @@ export class Analyzer {
         
         // Collect all class names in the hierarchy to filter out constructors/destructors
         const classNames = new Set(classHierarchy.map(c => c.name));
-        
-        for (const classNode of classHierarchy) {
+
+        // Iterate in REVERSE order (most-derived first: modded → original → parent)
+        // so that when we deduplicate by name, the most-derived version wins.
+        // This ensures modded class overrides are shown in completions instead of
+        // the parent's version, and that return type annotations reflect overrides.
+        for (let i = classHierarchy.length - 1; i >= 0; i--) {
+            const classNode = classHierarchy[i];
             for (const member of classNode.members || []) {
                 if (!member.name) continue;
                 if (seen.has(member.name)) continue; // Skip duplicates
@@ -2384,13 +2405,31 @@ export class Analyzer {
                     // Show visibility modifier if present
                     const visibility = func.modifiers?.find(m => ['private', 'protected'].includes(m)) || '';
                     const visPrefix = visibility ? `${visibility} ` : '';
+
+                    // Build snippet text with parameter placeholders
+                    let snippetText: string | undefined;
+                    const paramList = func.parameters || [];
+                    if (paramList.length > 0) {
+                        const snippetParams = paramList.map((p, idx) => 
+                            `\${${idx + 1}:${p.name}}`
+                        ).join(', ');
+                        snippetText = `${func.name}(${snippetParams})`;
+                    }
+
+                    // Build parameter info for signatureHelp
+                    const paramInfo = paramList.map(p => ({
+                        name: p.name,
+                        type: subst(p.type?.identifier) || 'auto'
+                    }));
                     
                     results.push({
                         name: func.name,
                         kind: 'function',
                         detail: `${visPrefix}${resolvedReturnType}(${params}) - ${classNode.name}`,
                         insertText: `${func.name}()`,
-                        returnType: resolvedReturnType
+                        snippetText,
+                        returnType: resolvedReturnType,
+                        parameters: paramInfo.length > 0 ? paramInfo : undefined
                     });
                 } else if (member.kind === 'VarDecl') {
                     const field = member as VarDeclNode;
@@ -2435,12 +2474,23 @@ export class Analyzer {
                     const params = func.parameters?.map(p => 
                         `${p.type?.identifier || 'auto'} ${p.name}`
                     ).join(', ') || '';
+
+                    // Build snippet text with parameter placeholders
+                    let snippetText: string | undefined;
+                    const paramList = func.parameters || [];
+                    if (paramList.length > 0) {
+                        const snippetParams = paramList.map((p, idx) => 
+                            `\${${idx + 1}:${p.name}}`
+                        ).join(', ');
+                        snippetText = `${func.name}(${snippetParams})`;
+                    }
                     
                     results.push({
                         name: `${func.name}(${params})`,
                         kind: 'function',
                         detail: `${func.returnType?.identifier || 'void'} (static)`,
-                        insertText: `${func.name}()`
+                        insertText: `${func.name}()`,
+                        snippetText,
                     });
                 } else if (member.kind === 'VarDecl') {
                     const field = member as VarDeclNode;
@@ -3022,16 +3072,445 @@ export class Analyzer {
         return undefined;
     }
 
-    findReferences(doc: TextDocument, _pos: Position, _inc: boolean) {
-        return [];
+    // ========================================================================
+    // FIND REFERENCES — Workspace-Wide Symbol Reference Search
+    // ========================================================================
+    // Strategy:
+    //   1. Resolve the symbol at cursor to get its definition(s)
+    //   2. Build a "definition key" from the definition location(s)
+    //   3. Scan ALL indexed documents for occurrences of the symbol name
+    //   4. For each occurrence, resolve its definition and compare keys
+    //   5. Return matching locations
+    //
+    // This handles:
+    //   - Class references (including modded classes)
+    //   - Method/field references across inheritance hierarchy
+    //   - Global function references
+    //   - Enum and enum member references
+    //   - Typedef references
+    //   - Local variable references within the same file
+    // ========================================================================
+    findReferences(doc: TextDocument, _pos: Position, includeDeclaration: boolean): Location[] {
+        const offset = doc.offsetAt(_pos);
+        const text = doc.getText();
+        const token = getTokenAtPosition(text, offset);
+        if (!token) return [];
+
+        const typeKeywords = new Set(['string', 'int', 'float', 'bool', 'vector', 'typename', 'void']);
+        if (token.kind !== TokenKind.Identifier &&
+            !(token.kind === TokenKind.Keyword && typeKeywords.has(token.value)) &&
+            !(token.kind === TokenKind.Keyword && token.value === 'this')) {
+            return [];
+        }
+
+        const name = token.value;
+        if (name === 'this') return []; // 'this' references aren't meaningful
+
+        // Resolve the definition(s) that this symbol points to
+        const definitions = this.resolveDefinitions(doc, _pos);
+        if (definitions.length === 0) return [];
+
+        // Build definition keys for fast matching. A definition key is
+        // "uri:line:char" which uniquely identifies a declaration.
+        const definitionKeys = new Set<string>();
+        for (const def of definitions) {
+            const defUri = (def as any)._sourceUri || def.uri;
+            const key = `${defUri}:${def.nameStart.line}:${def.nameStart.character}`;
+            definitionKeys.add(key);
+        }
+        
+        // Also collect class names if this is a class member —
+        // we need to match references that go through different classes
+        // in the same inheritance hierarchy.
+        const isClassMember = definitions.some(d => (d as any)._containerClassName);
+        const memberName = name;
+        let hierarchyClassNames: Set<string> | undefined;
+        if (isClassMember) {
+            hierarchyClassNames = new Set<string>();
+            for (const def of definitions) {
+                const containerClass = (def as any)._containerClassName as string | undefined;
+                if (containerClass) {
+                    // Get the full hierarchy for this class
+                    const hierarchy = this.getClassHierarchyOrdered(containerClass, new Set());
+                    for (const cls of hierarchy) {
+                        hierarchyClassNames.add(cls.name);
+                    }
+                }
+            }
+        }
+
+        // Determine if definition is a class/enum/typedef (type-level symbol)
+        const isTypeSymbol = definitions.some(d =>
+            d.kind === 'ClassDecl' || d.kind === 'EnumDecl' || d.kind === 'Typedef');
+
+        // Determine if definition is a global function
+        const isGlobalFunc = definitions.some(d =>
+            d.kind === 'FunctionDecl' && !(d as any)._containerClassName);
+
+        const results: Location[] = [];
+        const seenLocations = new Set<string>();
+
+        const addLocation = (uri: string, start: Position, end: Position) => {
+            const locKey = `${uri}:${start.line}:${start.character}`;
+            if (seenLocations.has(locKey)) return;
+            seenLocations.add(locKey);
+            results.push({ uri, range: { start, end } });
+        };
+
+        // Helper: check if a definition at given position matches our target
+        const matchesDefinition = (refDoc: TextDocument, refPos: Position): boolean => {
+            const refDefs = this.resolveDefinitions(refDoc, refPos);
+            for (const refDef of refDefs) {
+                const refUri = (refDef as any)._sourceUri || refDef.uri;
+                const key = `${refUri}:${refDef.nameStart.line}:${refDef.nameStart.character}`;
+                if (definitionKeys.has(key)) return true;
+            }
+            return false;
+        };
+
+        // If includeDeclaration, add the definition locations first
+        if (includeDeclaration) {
+            for (const def of definitions) {
+                const defUri = (def as any)._sourceUri || def.uri;
+                addLocation(defUri, def.nameStart, def.nameEnd);
+            }
+        }
+
+        // Scan all cached documents for occurrences of the symbol name
+        for (const [uri, ast] of this.docCache) {
+            // Get the document text — we need it to scan for token positions
+            // For files not currently open, we may not have a TextDocument,
+            // so we reconstruct from docCache knowledge
+            let scanDoc: TextDocument | undefined;
+            
+            // Try to find the document by reading from disk is not practical here.
+            // Instead, we scan the AST nodes directly for name matches.
+            // This is faster and doesn't require re-reading files.
+
+            // 1. Scan class declarations: class name, base class name, members
+            for (const node of ast.body) {
+                if (node.kind === 'ClassDecl') {
+                    const cls = node as ClassDeclNode;
+                    
+                    // Class name reference (for type symbols)
+                    if (isTypeSymbol && cls.name === name) {
+                        addLocation(uri, cls.nameStart, cls.nameEnd);
+                    }
+                    
+                    // Base class reference (extends SomeClass)
+                    if (isTypeSymbol && cls.base && cls.base.identifier === name) {
+                        addLocation(uri, cls.base.start, cls.base.end);
+                    }
+                    
+                    // Scan members
+                    for (const member of cls.members || []) {
+                        if (member.kind === 'FunctionDecl') {
+                            const func = member as FunctionDeclNode;
+                            
+                            // Function name matches (for class member references)
+                            if (isClassMember && func.name === memberName) {
+                                // Verify this class is in our hierarchy
+                                if (hierarchyClassNames?.has(cls.name)) {
+                                    addLocation(uri, func.nameStart, func.nameEnd);
+                                }
+                            }
+                            
+                            // Return type reference
+                            if (isTypeSymbol && func.returnType?.identifier === name) {
+                                addLocation(uri, func.returnType.start, func.returnType.end);
+                            }
+                            
+                            // Parameter types
+                            for (const param of func.parameters || []) {
+                                if (isTypeSymbol && param.type?.identifier === name) {
+                                    addLocation(uri, param.type.start, param.type.end);
+                                }
+                                // Generic args in parameter types
+                                if (isTypeSymbol && param.type?.genericArgs) {
+                                    for (const ga of param.type.genericArgs) {
+                                        if (ga.identifier === name) {
+                                            addLocation(uri, ga.start, ga.end);
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Local variables type references
+                            for (const local of func.locals || []) {
+                                if (isTypeSymbol && local.type?.identifier === name) {
+                                    addLocation(uri, local.type.start, local.type.end);
+                                }
+                            }
+                        }
+                        
+                        if (member.kind === 'VarDecl') {
+                            const v = member as VarDeclNode;
+                            
+                            // Field name matches (for class member references)
+                            if (isClassMember && v.name === memberName) {
+                                if (hierarchyClassNames?.has(cls.name)) {
+                                    addLocation(uri, v.nameStart, v.nameEnd);
+                                }
+                            }
+                            
+                            // Type reference
+                            if (isTypeSymbol && v.type?.identifier === name) {
+                                addLocation(uri, v.type.start, v.type.end);
+                            }
+                            // Generic args in field types
+                            if (isTypeSymbol && v.type?.genericArgs) {
+                                for (const ga of v.type.genericArgs) {
+                                    if (ga.identifier === name) {
+                                        addLocation(uri, ga.start, ga.end);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                
+                // Global function declarations
+                if (node.kind === 'FunctionDecl') {
+                    const func = node as FunctionDeclNode;
+                    
+                    // Function name
+                    if (isGlobalFunc && func.name === name) {
+                        addLocation(uri, func.nameStart, func.nameEnd);
+                    }
+                    
+                    // Return type
+                    if (isTypeSymbol && func.returnType?.identifier === name) {
+                        addLocation(uri, func.returnType.start, func.returnType.end);
+                    }
+                    
+                    // Parameters
+                    for (const param of func.parameters || []) {
+                        if (isTypeSymbol && param.type?.identifier === name) {
+                            addLocation(uri, param.type.start, param.type.end);
+                        }
+                    }
+                    
+                    // Locals
+                    for (const local of func.locals || []) {
+                        if (isTypeSymbol && local.type?.identifier === name) {
+                            addLocation(uri, local.type.start, local.type.end);
+                        }
+                    }
+                }
+                
+                // Global variables
+                if (node.kind === 'VarDecl') {
+                    const v = node as VarDeclNode;
+                    if (isTypeSymbol && v.type?.identifier === name) {
+                        addLocation(uri, v.type.start, v.type.end);
+                    }
+                }
+                
+                // Enum declarations
+                if (node.kind === 'EnumDecl') {
+                    const enumNode = node as EnumDeclNode;
+                    if (isTypeSymbol && enumNode.name === name) {
+                        addLocation(uri, enumNode.nameStart, enumNode.nameEnd);
+                    }
+                }
+                
+                // Typedef declarations
+                if (node.kind === 'Typedef') {
+                    const td = node as TypedefNode;
+                    if (isTypeSymbol && td.name === name) {
+                        addLocation(uri, td.nameStart, td.nameEnd);
+                    }
+                    // The aliased type
+                    if (isTypeSymbol && td.oldType?.identifier === name) {
+                        addLocation(uri, td.oldType.start, td.oldType.end);
+                    }
+                }
+            }
+        }
+
+        return results;
     }
 
+    // ========================================================================
+    // PREPARE RENAME — Validates that the cursor is on a renameable symbol
+    // ========================================================================
     prepareRename(doc: TextDocument, _pos: Position): Range | null {
-        return null;
+        const offset = doc.offsetAt(_pos);
+        const text = doc.getText();
+        const token = getTokenAtPosition(text, offset);
+        if (!token) return null;
+
+        // Only allow renaming identifiers
+        if (token.kind !== TokenKind.Identifier) return null;
+
+        const name = token.value;
+        
+        // Resolve to check this is a valid symbol
+        const definitions = this.resolveDefinitions(doc, _pos);
+        if (definitions.length === 0) return null;
+
+        // Don't allow renaming built-in types or engine symbols
+        // (we can only rename symbols defined in user files)
+        const hasUserDefinition = definitions.some(d => {
+            const defUri = (d as any)._sourceUri || d.uri;
+            return defUri && defUri.startsWith('file:');
+        });
+        if (!hasUserDefinition) return null;
+
+        // Return the range of the token under cursor
+        const startPos = doc.positionAt(token.start);
+        const endPos = doc.positionAt(token.end);
+        return { start: startPos, end: endPos };
     }
 
-    renameSymbol(doc: TextDocument, _pos: Position, _newName: string) {
-        return [] as { uri: string; range: Range }[];
+    // ========================================================================
+    // RENAME SYMBOL — Workspace-wide symbol rename using findReferences
+    // ========================================================================
+    renameSymbol(doc: TextDocument, _pos: Position, _newName: string): { uri: string; range: Range }[] {
+        // Use prepareRename to validate first
+        const range = this.prepareRename(doc, _pos);
+        if (!range) return [];
+
+        // Find all references (including the declaration itself)
+        const refs = this.findReferences(doc, _pos, true);
+        
+        // Convert Location[] to the edit format
+        return refs.map(ref => ({
+            uri: ref.uri,
+            range: ref.range
+        }));
+    }
+
+    // ========================================================================
+    // SIGNATURE HELP — Parameter Information While Typing
+    // ========================================================================
+    // Triggered when the cursor is inside a function call parentheses.
+    // Shows the function signature with the current parameter highlighted.
+    //
+    // Strategy:
+    //   1. Scan backward from cursor to find the opening '(' 
+    //   2. Count commas before cursor to determine active parameter index
+    //   3. Find the function name before the '('
+    //   4. Resolve the function to get its declaration
+    //   5. Return signature information with parameter docs
+    // ========================================================================
+    getSignatureHelp(doc: TextDocument, pos: Position): {
+        signatures: {
+            label: string;
+            parameters: { label: string; documentation?: string }[];
+        }[];
+        activeSignature: number;
+        activeParameter: number;
+    } | null {
+        const text = doc.getText();
+        const offset = doc.offsetAt(pos);
+        
+        // Scan backward to find the unclosed '(' that contains the cursor
+        let depth = 0;
+        let parenOffset = -1;
+        let commaCount = 0;
+        
+        for (let i = offset - 1; i >= 0; i--) {
+            const ch = text[i];
+            if (ch === ')') depth++;
+            else if (ch === '(') {
+                if (depth === 0) {
+                    parenOffset = i;
+                    break;
+                }
+                depth--;
+            } else if (ch === ',' && depth === 0) {
+                commaCount++;
+            } else if (ch === ';' || ch === '{' || ch === '}') {
+                // Crossed a statement boundary — not inside a call
+                break;
+            }
+        }
+        
+        if (parenOffset < 0) return null;
+        
+        // Find the function name before the '('
+        // Could be: funcName(, obj.funcName(, Class.StaticFunc(, etc.
+        const textBefore = text.substring(0, parenOffset);
+        const funcNameMatch = textBefore.match(/(\w+)\s*$/);
+        if (!funcNameMatch) return null;
+        
+        const funcName = funcNameMatch[1];
+        const funcNameStart = parenOffset - funcNameMatch[0].length + funcNameMatch.index! - (textBefore.length - funcNameMatch[0].length - (textBefore.length - parenOffset));
+        
+        // Resolve the function — use resolveDefinitions at the function name position
+        const funcNameOffset = parenOffset - (funcNameMatch[0].length - funcNameMatch[0].trimStart().length) - funcName.length;
+        const funcPos = doc.positionAt(funcNameOffset + Math.floor(funcName.length / 2));
+        
+        const definitions = this.resolveDefinitions(doc, funcPos);
+        if (definitions.length === 0) return null;
+        
+        // Collect all function overloads
+        const signatures: {
+            label: string;
+            parameters: { label: string; documentation?: string }[];
+        }[] = [];
+        
+        for (const def of definitions) {
+            if (def.kind !== 'FunctionDecl') continue;
+            const func = def as FunctionDeclNode;
+            
+            const params = func.parameters || [];
+            const paramLabels = params.map(p => {
+                const mods = p.modifiers?.length ? p.modifiers.join(' ') + ' ' : '';
+                return `${mods}${p.type?.identifier || 'auto'} ${p.name}`;
+            });
+            
+            const returnType = func.returnType?.identifier || 'void';
+            const label = `${returnType} ${func.name}(${paramLabels.join(', ')})`;
+            
+            signatures.push({
+                label,
+                parameters: paramLabels.map((pl, idx) => ({
+                    label: pl,
+                    documentation: params[idx]?.type?.identifier 
+                        ? `Type: ${params[idx].type.identifier}` 
+                        : undefined
+                }))
+            });
+        }
+        
+        // If the funcName matches a class name, it could be a constructor call
+        // e.g., new MyClass(param1, param2)
+        if (signatures.length === 0) {
+            const classNode = this.findClassByName(funcName);
+            if (classNode) {
+                // Look for constructor in the class
+                for (const member of classNode.members || []) {
+                    if (member.kind === 'FunctionDecl' && member.name === funcName) {
+                        const func = member as FunctionDeclNode;
+                        const params = func.parameters || [];
+                        const paramLabels = params.map(p => {
+                            const mods = p.modifiers?.length ? p.modifiers.join(' ') + ' ' : '';
+                            return `${mods}${p.type?.identifier || 'auto'} ${p.name}`;
+                        });
+                        
+                        signatures.push({
+                            label: `${funcName}(${paramLabels.join(', ')})`,
+                            parameters: paramLabels.map((pl, idx) => ({
+                                label: pl,
+                                documentation: params[idx]?.type?.identifier
+                                    ? `Type: ${params[idx].type.identifier}`
+                                    : undefined
+                            }))
+                        });
+                    }
+                }
+            }
+        }
+        
+        if (signatures.length === 0) return null;
+        
+        return {
+            signatures,
+            activeSignature: 0,
+            activeParameter: commaCount
+        };
     }
 
     // ========================================================================
@@ -3391,6 +3870,12 @@ export class Analyzer {
                 let parentClasses: ClassDeclNode[] = [];
                 if (cls.base?.identifier) {
                     parentClasses = this.getClassHierarchyOrdered(cls.base.identifier, new Set());
+                } else if (cls.modifiers?.includes('modded')) {
+                    // Modded class implicitly extends the original class of the same name.
+                    // Get the full hierarchy (original + its parents) as "parent classes".
+                    // Exclude this exact modded class node (already scanned above).
+                    parentClasses = this.getClassHierarchyOrdered(cls.name, new Set())
+                        .filter(c => c !== cls);
                 } else if (cls.name !== 'Class') {
                     parentClasses = this.getClassHierarchyOrdered('Class', new Set());
                 }
@@ -3450,6 +3935,11 @@ export class Analyzer {
             // Check for unknown types and symbols
             this.checkUnknownSymbols(ast, diags);
             
+            // Check sealed class inheritance violations.
+            // This is separate from checkUnknownSymbols because it doesn't need
+            // the 500-file threshold — it only needs findClassByName to work.
+            this.checkSealedClassInheritance(ast, diags);
+            
             // Build scoped variable map once (used by both type mismatch and
             // call arg checkers). Placed here because it requires the index
             // to be populated (getClassHierarchyOrdered for inherited fields).
@@ -3479,6 +3969,14 @@ export class Analyzer {
         // Now AST-based: uses parser's locals with scopeEnd ranges instead
         // of re-parsing text line-by-line. Also checks missing 'override' keyword.
         this.checkDuplicateVariables(ast, diags);
+        
+        // Run pluggable diagnostic rules from the engine
+        const ruleContext = {
+            findClassByName: (name: string) => this.findClassByName(name),
+            getClassHierarchy: (name: string) => this.getClassHierarchyOrdered(name, new Set()),
+            indexedFileCount: this.docCache.size
+        };
+        diags.push(...this.diagnosticEngine.run(ast, ruleContext));
         
         return diags;
     }
@@ -6176,6 +6674,31 @@ export class Analyzer {
      * - Unknown base classes
      * - Unknown function return types
      */
+
+    /**
+     * Check that no non-modded class extends a sealed class.
+     * Sealed classes cannot be inherited from (only modded to add behavior).
+     * This runs at the 100-file threshold (not the 500-file unknown-type threshold)
+     * because it only needs findClassByName, not the full type existence check.
+     */
+    private checkSealedClassInheritance(ast: File, diags: Diagnostic[]): void {
+        for (const node of ast.body) {
+            if (node.kind === 'ClassDecl') {
+                const classNode = node as ClassDeclNode;
+                if (classNode.base && !classNode.modifiers?.includes('modded')) {
+                    const baseClass = this.findClassByName(classNode.base.identifier);
+                    if (baseClass && baseClass.modifiers?.includes('sealed')) {
+                        diags.push({
+                            message: `Cannot extend sealed class '${classNode.base.identifier}'. Sealed classes cannot be inherited from.`,
+                            range: { start: classNode.base.start, end: classNode.base.end },
+                            severity: DiagnosticSeverity.Error
+                        });
+                    }
+                }
+            }
+        }
+    }
+
     private checkUnknownSymbols(ast: File, diags: Diagnostic[]): void {
         // Only truly primitive/language types that aren't defined in any file
         // Everything else should come from indexed files in P:\scripts
