@@ -24,6 +24,8 @@ const connection = createConnection(ProposedFeatures.all);
 export const documents: TextDocuments<TextDocument> = new TextDocuments(TextDocument);
 
 let workspaceRoots: string[] = [];
+let indexingComplete = false;
+let indexingPromise: Promise<void> | null = null;
 
 connection.onInitialize((_params: InitializeParams): InitializeResult => {
     const folders = _params.workspaceFolders ?? [];
@@ -47,7 +49,8 @@ connection.onInitialize((_params: InitializeParams): InitializeResult => {
     };
 });
 
-connection.onInitialized(async () => {
+connection.onInitialized(() => {
+    indexingPromise = (async () => {
     const config = await getConfiguration(connection);
     const includePaths = config.includePaths as string[] || [];
     const preprocessorDefines = config.preprocessorDefines as string[] || [];
@@ -140,16 +143,24 @@ connection.onInitialized(async () => {
     }
     
     // Notify client that indexing is complete - trigger refresh of open files
+    indexingComplete = true;
     connection.sendNotification('enscript/indexingComplete', { 
         fileCount: allFiles.length,
         workspaceRoots: workspaceRoots 
     });
+    })(); // end of indexingPromise IIFE
 });
 
 // Handle request to check all workspace files
 connection.onRequest('enscript/checkWorkspace', async () => {
-    console.log(`Checking all workspace files in ${workspaceRoots.join(', ')}...`);
+    // Wait for initial indexing to complete before checking
+    if (!indexingComplete && indexingPromise) {
+        console.log('Waiting for indexing to complete before checking workspace...');
+        await indexingPromise;
+    }
     
+    console.log(`Checking all workspace files in ${workspaceRoots.join(', ')}...`);
+
     const allCheckFiles: string[] = [];
     for (const root of workspaceRoots) {
         const found = await findAllFiles(root, ['.c']);
@@ -157,21 +168,26 @@ connection.onRequest('enscript/checkWorkspace', async () => {
     }
     const files = allCheckFiles;
     const allDiagnostics: Array<{ uri: string; diagnostics: any[] }> = [];
-    
+
+    const analyzer = Analyzer.instance();
+    let checked = 0;
     for (const filePath of files) {
         const uri = url.pathToFileURL(filePath).toString();
+        // Only report diagnostics for workspace files, not include-path files
+        if (!analyzer.isWorkspaceFile(uri)) continue;
+        checked++;
         const text = await readFileUtf8(filePath);
         const doc = TextDocument.create(uri, 'enscript', 1, text);
-        
-        const diagnostics = Analyzer.instance().runDiagnostics(doc);
+
+        const diagnostics = analyzer.runDiagnostics(doc);
         if (diagnostics.length > 0) {
             allDiagnostics.push({ uri, diagnostics });
             // Publish diagnostics so they show in Problems panel
             connection.sendDiagnostics({ uri, diagnostics });
         }
     }
-    
-    console.log(`Checked ${files.length} files, found issues in ${allDiagnostics.length} files`);
+
+    console.log(`Checked ${checked} workspace files (${files.length} found), issues in ${allDiagnostics.length} files`);
 
     // Verbose breakdown by diagnostic category
     if (allDiagnostics.length > 0) {
@@ -197,7 +213,7 @@ connection.onRequest('enscript/checkWorkspace', async () => {
         console.log(`  Breakdown: ${parts.join(', ')}`);
     }
     return { 
-        filesChecked: files.length, 
+        filesChecked: checked, 
         filesWithIssues: allDiagnostics.length,
         totalIssues: allDiagnostics.reduce((sum, d) => sum + d.diagnostics.length, 0)
     };
