@@ -171,6 +171,7 @@ export interface FunctionDeclNode extends SymbolNodeBase {
     returnStatements: ReturnStatementInfo[];  // All return statements found in the body
     hasBody: boolean;                          // true if function has a { } body (not proto/native)
     isOverride: boolean;                       // true if declared with the 'override' keyword
+    bodyTypeRefs: TypeNode[];                  // Type references found in the body (e.g., static call targets: ClassName.Method())
 }
 
 export interface File {
@@ -644,6 +645,7 @@ export function parse(
             // ====================================================================
             const locals: VarDeclNode[] = [];
             const returnStatements: ReturnStatementInfo[] = [];
+            const bodyTypeRefs: TypeNode[] = [];
             let hasBody = false;
             if (peek().value === '{') {
                 hasBody = true;
@@ -855,6 +857,35 @@ export function parse(
                         }
                     }
 
+                    // ================================================================
+                    // STATIC CALL TARGET DETECTION
+                    // ================================================================
+                    // Detect ClassName.Method() patterns: Identifier followed by '.'
+                    // Captures the identifier as a body type reference so that
+                    // cross-module visibility checks can flag violations like
+                    // using a 5_Mission class from 4_World code.
+                    // Only capture if the identifier starts with uppercase (class
+                    // names are PascalCase) to avoid capturing local variables.
+                    // Skip chained property accesses (e.g., context.Player.Do())
+                    // by requiring the token before the identifier is NOT a '.'.
+                    // ================================================================
+                    if (t.value === '.' && prev && prev.kind === TokenKind.Identifier
+                        && /^[A-Z]/.test(prev.value)
+                        && (!prevPrev || prevPrev.value !== '.')) {
+                        // Don't record duplicates for the same identifier in this body
+                        if (!bodyTypeRefs.some(r => r.identifier === prev!.value)) {
+                            bodyTypeRefs.push({
+                                kind: 'Type',
+                                uri: doc.uri,
+                                identifier: prev.value,
+                                start: doc.positionAt(prev.start),
+                                end: doc.positionAt(prev.end),
+                                arrayDims: [],
+                                modifiers: [],
+                            });
+                        }
+                    }
+
                     prevPrev = prev;
                     prevPrevIdx = prevIdx;
                     prev = t;
@@ -872,6 +903,7 @@ export function parse(
                 parameters: params,
                 locals: locals,
                 returnStatements: returnStatements,
+                bodyTypeRefs: bodyTypeRefs,
                 hasBody: hasBody,
                 isOverride: mods.includes('override'),
                 annotations: annotations,

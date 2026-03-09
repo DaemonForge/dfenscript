@@ -187,3 +187,124 @@ describe('checkUnknownSymbols – cross-module diagnostics are errors', () => {
         expect(crossModuleDiag).toBeUndefined();
     });
 });
+
+// ══════════════════════════════════════════════════════════════════════════════
+// 3. checkUnknownSymbols — static call targets (ClassName.Method()) 
+// ══════════════════════════════════════════════════════════════════════════════
+
+describe('checkUnknownSymbols – static call cross-module diagnostics', () => {
+    let analyzer: Analyzer;
+
+    beforeAll(() => {
+        analyzer = freshAnalyzer();
+        // MissionMenu lives in module 5 (5_Mission)
+        indexDoc(analyzer, 'class MissionMenu {};', 'file:///5_Mission/menu.c');
+        // WorldHelper lives in module 4 (4_World)
+        indexDoc(analyzer, 'class WorldHelper {};', 'file:///4_World/helper.c');
+        // CoreUtil lives in module 1 (1_Core)
+        indexDoc(analyzer, 'class CoreUtil {};', 'file:///1_Core/util.c');
+        // Pad the cache so checkUnknownSymbols' internal guard is satisfied
+        padDocCache(analyzer, 500);
+    });
+
+    test('static call on a higher-module class produces an Error diagnostic', () => {
+        // Module 4 file calls MissionMenu.Open() — MissionMenu is in module 5
+        const ast = indexDoc(
+            analyzer,
+            'class MyAction { void Execute() { MissionMenu.Open(); }; };',
+            'file:///4_World/action.c'
+        );
+        const diags: any[] = [];
+        (analyzer as any).checkUnknownSymbols(ast, diags);
+
+        const crossModuleDiag = diags.find((d: any) =>
+            d.message.includes('MissionMenu') && d.message.includes('5_Mission')
+        );
+        expect(crossModuleDiag).toBeDefined();
+        expect(crossModuleDiag!.severity).toBe(DiagnosticSeverity.Error);
+    });
+
+    test('static call on a same-module class produces no cross-module diagnostic', () => {
+        // Module 4 file calls WorldHelper.Do() — WorldHelper is also in module 4
+        const ast = indexDoc(
+            analyzer,
+            'class MyAction2 { void Execute() { WorldHelper.Do(); }; };',
+            'file:///4_World/action2.c'
+        );
+        const diags: any[] = [];
+        (analyzer as any).checkUnknownSymbols(ast, diags);
+
+        const crossModuleDiag = diags.find((d: any) =>
+            d.message.includes('WorldHelper') && d.message.includes('4_World')
+        );
+        expect(crossModuleDiag).toBeUndefined();
+    });
+
+    test('static call on a lower-module class produces no cross-module diagnostic', () => {
+        // Module 4 file calls CoreUtil.Do() — CoreUtil is in module 1 (lower)
+        const ast = indexDoc(
+            analyzer,
+            'class MyAction3 { void Execute() { CoreUtil.Do(); }; };',
+            'file:///4_World/action3.c'
+        );
+        const diags: any[] = [];
+        (analyzer as any).checkUnknownSymbols(ast, diags);
+
+        const crossModuleDiag = diags.find((d: any) =>
+            d.message.includes('CoreUtil')
+        );
+        expect(crossModuleDiag).toBeUndefined();
+    });
+
+    test('static call in a top-level function also detects cross-module violation', () => {
+        // Module 4 top-level function calls MissionMenu.Open()
+        const ast = indexDoc(
+            analyzer,
+            'void MyFunc() { MissionMenu.Open(); };',
+            'file:///4_World/func.c'
+        );
+        const diags: any[] = [];
+        (analyzer as any).checkUnknownSymbols(ast, diags);
+
+        const crossModuleDiag = diags.find((d: any) =>
+            d.message.includes('MissionMenu') && d.message.includes('5_Mission')
+        );
+        expect(crossModuleDiag).toBeDefined();
+        expect(crossModuleDiag!.severity).toBe(DiagnosticSeverity.Error);
+    });
+
+    test('chained property access on uppercase field is NOT treated as static call', () => {
+        // context.Player.DoSomething() — Player is a property, not a static call
+        const ast = indexDoc(
+            analyzer,
+            'class MyService { void Process() { context.MissionMenu.Open(); }; };',
+            'file:///4_World/service.c'
+        );
+        const diags: any[] = [];
+        (analyzer as any).checkUnknownSymbols(ast, diags);
+
+        // MissionMenu here is accessed via context.MissionMenu — a chained property,
+        // NOT a static call. Should produce no cross-module diagnostic.
+        const crossModuleDiag = diags.find((d: any) =>
+            d.message.includes('MissionMenu') && d.message.includes('5_Mission')
+        );
+        expect(crossModuleDiag).toBeUndefined();
+    });
+
+    test('uppercase variable with dot access does NOT produce unknown type warning', () => {
+        // ServerURL.Length() — ServerURL is a variable, not a class
+        // Should not produce any "Unknown type" warning for ServerURL
+        const ast = indexDoc(
+            analyzer,
+            'class MyConfig { void Load() { string ServerURL = ""; int len = ServerURL.Length(); }; };',
+            'file:///3_Game/config.c'
+        );
+        const diags: any[] = [];
+        (analyzer as any).checkUnknownSymbols(ast, diags);
+
+        const serverUrlDiag = diags.find((d: any) =>
+            d.message.includes('ServerURL')
+        );
+        expect(serverUrlDiag).toBeUndefined();
+    });
+});

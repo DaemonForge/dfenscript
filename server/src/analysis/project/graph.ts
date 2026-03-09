@@ -6787,6 +6787,26 @@ export class Analyzer {
             }
         };
         
+        // Check a body type ref (static call target like ClassName.Method()).
+        // Only produces cross-module errors — never "Unknown type" warnings,
+        // because uppercase identifiers followed by '.' can also be variables
+        // (e.g., ServerURL.Length()), not just class names.
+        const checkBodyTypeRef = (type: TypeNode | undefined): void => {
+            if (!type || currentModule <= 0) return;
+            
+            // Only check if this identifier actually resolves to a known class/enum
+            if (!this.findClassByName(type.identifier) && !this.findEnumByName(type.identifier)) return;
+            
+            const typeModule = this.getModuleForSymbol(type.identifier);
+            if (typeModule > 0 && typeModule > currentModule) {
+                diags.push({
+                    message: `Type '${type.identifier}' is defined in ${MODULE_NAMES[typeModule] || 'module ' + typeModule} and cannot be used from ${MODULE_NAMES[currentModule] || 'module ' + currentModule}. Higher-numbered modules are not visible to lower-numbered modules.`,
+                    range: { start: type.start, end: type.end },
+                    severity: DiagnosticSeverity.Error
+                });
+            }
+        };
+        
         // Walk the AST
         for (const node of ast.body) {
             // Check class declarations
@@ -6824,6 +6844,10 @@ export class Analyzer {
                         for (const local of func.locals || []) {
                             checkType(local.type);
                         }
+                        // Check static call targets (e.g., ClassName.Method()) in body
+                        for (const ref of func.bodyTypeRefs || []) {
+                            checkBodyTypeRef(ref);
+                        }
                     }
                 }
             }
@@ -6842,6 +6866,10 @@ export class Analyzer {
                 }
                 for (const local of func.locals || []) {
                     checkType(local.type);
+                }
+                // Check static call targets (e.g., ClassName.Method()) in body
+                for (const ref of func.bodyTypeRefs || []) {
+                    checkBodyTypeRef(ref);
                 }
             }
         }
