@@ -64,11 +64,16 @@ const NATIVE_ENGINE_CONSTANTS: readonly string[] = [
     'UACarShiftGearUp', 'UACarShiftGearDown', 'UAUITabLeft', 'UAUITabRight',
     'UAUIThumbRight','UAUIRight', 'UAUILeft','UAUIGesturesOpen', 
     'UAUIQuickbarToggle','UAWalkRunForced','UAMoveRight', 'UAMoveLeft',
-    'UAUICopyDebugMonitorPos','UAPersonView','UAUICredits',
-    // Dialog / UI constants
+    'UAUICopyDebugMonitorPos','UAPersonView','UAUICredits', 'UAUINextDown',
+    'UAUINextUp','UAUIUp','UAUIDown','UAUIGesturesOpen', 'UAUIQuickbarToggle',
+    'UAZeroingUp', 'UAZeroingDown', 'UANextActionCategory', 'UAPrevActionCategory',
+    'UANextAction', 'UAPrevAction', 'UAUIQuickbarRadialOpen',
+    //
     'DT_CUSTOM', 'DBT_OK', 'DBB_NONE', 'DMT_INFO', 'CT_CLASS',
     'DBT_YESNOCANCEL', 'DBB_YES', 'DBB_NO', 'DBB_CANCEL', 'CT_ARRAY',
-    'DMT_QUESTION', 'DBT_YESNO',
+    'DMT_QUESTION', 'DBT_YESNO','DMT_EXCLAMATION',
+    //damageType
+    'DT_FIRE_ARM', 'DT_EXPLOSION','DT_CLOSE_COMBAT','DT_CUSTOM',
     // Object intersection constants
     'ObjIntersectFire', 'ObjIntersectView', 'ObjIntersectGeom',
     'ObjIntersectIFire', 'ObjIntersectNone',
