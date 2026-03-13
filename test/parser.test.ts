@@ -70,6 +70,108 @@ test('detects two-variable foreach locals', () => {
     expect(localNames).toContain('val');
 });
 
+test('detects comma-separated local variable declarations', () => {
+    const code = `class Foo {
+    void Bar() {
+        float textX, textY;
+        int a, b, c;
+    }
+};`;
+    const doc = TextDocument.create('file:///test.enscript', 'enscript', 1, code);
+    const ast = parse(doc);
+    const cls = ast.body[0] as any;
+    const func = cls.members[0] as any;
+    const localNames = func.locals.map((l: any) => l.name);
+    // All comma-separated variables should be detected
+    expect(localNames).toContain('textX');
+    expect(localNames).toContain('textY');
+    expect(localNames).toContain('a');
+    expect(localNames).toContain('b');
+    expect(localNames).toContain('c');
+    // All should have the correct type
+    expect(func.locals.find((l: any) => l.name === 'textY').type.identifier).toBe('float');
+    expect(func.locals.find((l: any) => l.name === 'b').type.identifier).toBe('int');
+    expect(func.locals.find((l: any) => l.name === 'c').type.identifier).toBe('int');
+});
+
+test('comma chain does not leak across statements', () => {
+    // After `int a, b;` the comma chain must reset on `;`.
+    // The next statement `Foo(x, y);` must NOT treat y as a local.
+    const code = `class Foo {
+    void Bar() {
+        int a, b;
+        Foo(x, y);
+    }
+};`;
+    const doc = TextDocument.create('file:///test.enscript', 'enscript', 1, code);
+    const ast = parse(doc);
+    const cls = ast.body[0] as any;
+    const func = cls.members[0] as any;
+    const localNames = func.locals.map((l: any) => l.name);
+    expect(localNames).toContain('a');
+    expect(localNames).toContain('b');
+    // y must NOT be mistakenly detected as a local from a stale comma chain
+    expect(localNames).not.toContain('y');
+    expect(localNames).not.toContain('x');
+});
+
+test('comma chain does not leak across brace boundaries', () => {
+    // The comma chain must be cleared when entering/exiting a brace scope
+    const code = `class Foo {
+    void Bar() {
+        int a, b;
+        if (true) {
+            SomeFunc(c, d);
+        }
+    }
+};`;
+    const doc = TextDocument.create('file:///test.enscript', 'enscript', 1, code);
+    const ast = parse(doc);
+    const cls = ast.body[0] as any;
+    const func = cls.members[0] as any;
+    const localNames = func.locals.map((l: any) => l.name);
+    expect(localNames).toContain('a');
+    expect(localNames).toContain('b');
+    expect(localNames).not.toContain('c');
+    expect(localNames).not.toContain('d');
+});
+
+test('comma-separated with first var initialized', () => {
+    // `int a, b = 5;` — a is detected (Type Name ,), b follows via comma chain
+    const code = `class Foo {
+    void Bar() {
+        int a, b = 5;
+    }
+};`;
+    const doc = TextDocument.create('file:///test.enscript', 'enscript', 1, code);
+    const ast = parse(doc);
+    const cls = ast.body[0] as any;
+    const func = cls.members[0] as any;
+    const localNames = func.locals.map((l: any) => l.name);
+    expect(localNames).toContain('a');
+    expect(localNames).toContain('b');
+    expect(func.locals.find((l: any) => l.name === 'b').type.identifier).toBe('int');
+});
+
+test('comma chain resets after equals trigger', () => {
+    // After `int x = 0;` the comma chain must be null.
+    // A subsequent `Func(a, b);` must NOT detect b as a local.
+    const code = `class Foo {
+    void Bar() {
+        int x = 0;
+        Func(a, b);
+    }
+};`;
+    const doc = TextDocument.create('file:///test.enscript', 'enscript', 1, code);
+    const ast = parse(doc);
+    const cls = ast.body[0] as any;
+    const func = cls.members[0] as any;
+    const localNames = func.locals.map((l: any) => l.name);
+    expect(localNames).toContain('x');
+    expect(localNames).not.toContain('a');
+    expect(localNames).not.toContain('b');
+});
+
 test('does not false-positive on case labels', () => {
     const code = `class Foo {
     void Bar() {
@@ -274,6 +376,159 @@ test('no false positive for single-line strings', () => {
     expect(mlDiag).toBeUndefined();
 });
 
+test('reports semicolons used between enum members', () => {
+    const code = `enum NotificationsRPC
+{
+    NOTIFICATIONS_RPC_CONFIG = 1353998362;
+}`;
+    const doc = TextDocument.create('file:///test.enscript', 'enscript', 1, code);
+    const ast = parse(doc);
+
+    expect(ast.body[0]).toHaveProperty('kind', 'EnumDecl');
+
+    const enumSeparatorDiag = ast.diagnostics.find(d =>
+        d.message.includes('Enum members must be separated by commas')
+    );
+
+    expect(enumSeparatorDiag).toBeDefined();
+    expect(enumSeparatorDiag?.severity).toBeDefined();
+});
+
+// ── Enum separator edge-case tests (false-positive / false-negative) ──────
+
+test('no false positive: normal comma-separated enum', () => {
+    const code = `enum EColor { RED, GREEN, BLUE };`;
+    const doc = TextDocument.create('file:///test.enscript', 'enscript', 1, code);
+    const ast = parse(doc);
+    const enumNode = ast.body[0] as any;
+    expect(enumNode.kind).toBe('EnumDecl');
+    expect(enumNode.members.map((m: any) => m.name)).toEqual(['RED', 'GREEN', 'BLUE']);
+    expect(ast.diagnostics.filter(d => d.message.includes('semicolon'))).toHaveLength(0);
+});
+
+test('no false positive: enum with assigned numeric values', () => {
+    const code = `enum ERPCs { RPC_ONE = 1000, RPC_TWO = 2000, RPC_THREE = 3000 };`;
+    const doc = TextDocument.create('file:///test.enscript', 'enscript', 1, code);
+    const ast = parse(doc);
+    const enumNode = ast.body[0] as any;
+    expect(enumNode.members.map((m: any) => m.name)).toEqual(['RPC_ONE', 'RPC_TWO', 'RPC_THREE']);
+    expect(ast.diagnostics.filter(d => d.message.includes('semicolon'))).toHaveLength(0);
+});
+
+test('no false positive: single enum member without trailing comma', () => {
+    const code = `enum ESingle { ONLY_ONE };`;
+    const doc = TextDocument.create('file:///test.enscript', 'enscript', 1, code);
+    const ast = parse(doc);
+    const enumNode = ast.body[0] as any;
+    expect(enumNode.members.map((m: any) => m.name)).toEqual(['ONLY_ONE']);
+    expect(ast.diagnostics.filter(d => d.message.includes('semicolon'))).toHaveLength(0);
+});
+
+test('no false positive: enum with trailing comma', () => {
+    const code = `enum ETrailing { A, B, C, };`;
+    const doc = TextDocument.create('file:///test.enscript', 'enscript', 1, code);
+    const ast = parse(doc);
+    const enumNode = ast.body[0] as any;
+    expect(enumNode.members.map((m: any) => m.name)).toEqual(['A', 'B', 'C']);
+    expect(ast.diagnostics.filter(d => d.message.includes('semicolon'))).toHaveLength(0);
+});
+
+test('no false positive: empty enum', () => {
+    const code = `enum EEmpty { };`;
+    const doc = TextDocument.create('file:///test.enscript', 'enscript', 1, code);
+    const ast = parse(doc);
+    const enumNode = ast.body[0] as any;
+    expect(enumNode.kind).toBe('EnumDecl');
+    expect(enumNode.members).toHaveLength(0);
+    expect(ast.diagnostics.filter(d => d.message.includes('semicolon'))).toHaveLength(0);
+});
+
+test('no false positive: enum with base type and commas', () => {
+    const code = `enum EFlags : int { NONE, READ = 1, WRITE = 2 };`;
+    const doc = TextDocument.create('file:///test.enscript', 'enscript', 1, code);
+    const ast = parse(doc);
+    const enumNode = ast.body[0] as any;
+    expect(enumNode.members.map((m: any) => m.name)).toEqual(['NONE', 'READ', 'WRITE']);
+    expect(ast.diagnostics.filter(d => d.message.includes('semicolon'))).toHaveLength(0);
+});
+
+test('no false positive: enum with hex values', () => {
+    const code = `enum EHex { A = 0x0001, B = 0x0002, C = 0x0004 };`;
+    const doc = TextDocument.create('file:///test.enscript', 'enscript', 1, code);
+    const ast = parse(doc);
+    const enumNode = ast.body[0] as any;
+    expect(enumNode.members.map((m: any) => m.name)).toEqual(['A', 'B', 'C']);
+    expect(ast.diagnostics.filter(d => d.message.includes('semicolon'))).toHaveLength(0);
+});
+
+test('no false positive: enum followed by class with semicolons', () => {
+    const code = `enum EColor { RED, GREEN, BLUE };
+class Painter {
+    EColor m_color;
+    void SetColor(EColor color) {
+        m_color = color;
+    }
+};`;
+    const doc = TextDocument.create('file:///test.enscript', 'enscript', 1, code);
+    const ast = parse(doc);
+    expect(ast.diagnostics.filter(d => d.message.includes('semicolon'))).toHaveLength(0);
+    expect(ast.body[0]).toHaveProperty('kind', 'EnumDecl');
+    expect(ast.body[1]).toHaveProperty('kind', 'ClassDecl');
+});
+
+test('flags multiple semicolons in multi-member enum', () => {
+    const code = `enum ERPCs {
+    RPC_A = 100;
+    RPC_B = 200;
+    RPC_C = 300;
+}`;
+    const doc = TextDocument.create('file:///test.enscript', 'enscript', 1, code);
+    const ast = parse(doc);
+    const enumNode = ast.body[0] as any;
+    expect(enumNode.members.map((m: any) => m.name)).toEqual(['RPC_A', 'RPC_B', 'RPC_C']);
+    const semiDiags = ast.diagnostics.filter(d => d.message.includes('Enum members must be separated by commas'));
+    expect(semiDiags).toHaveLength(3);
+});
+
+test('flags only the semicolon in mixed comma/semicolon enum', () => {
+    const code = `enum EMixed { A = 1, B = 2; C = 3 };`;
+    const doc = TextDocument.create('file:///test.enscript', 'enscript', 1, code);
+    const ast = parse(doc);
+    const enumNode = ast.body[0] as any;
+    expect(enumNode.members.map((m: any) => m.name)).toEqual(['A', 'B', 'C']);
+    const semiDiags = ast.diagnostics.filter(d => d.message.includes('Enum members must be separated by commas'));
+    expect(semiDiags).toHaveLength(1);
+});
+
+test('no false positive: enum with negative values', () => {
+    const code = `enum ESigned { NEG = -1, ZERO = 0, POS = 1 };`;
+    const doc = TextDocument.create('file:///test.enscript', 'enscript', 1, code);
+    const ast = parse(doc);
+    const enumNode = ast.body[0] as any;
+    expect(enumNode.members.map((m: any) => m.name)).toEqual(['NEG', 'ZERO', 'POS']);
+    expect(ast.diagnostics.filter(d => d.message.includes('semicolon'))).toHaveLength(0);
+});
+
+test('no false positive: enum with bitwise OR values', () => {
+    const code = `enum EBits { A = 1, B = 2, AB = 1 | 2 };`;
+    const doc = TextDocument.create('file:///test.enscript', 'enscript', 1, code);
+    const ast = parse(doc);
+    const enumNode = ast.body[0] as any;
+    expect(enumNode.members.map((m: any) => m.name)).toEqual(['A', 'B', 'AB']);
+    expect(ast.diagnostics.filter(d => d.message.includes('semicolon'))).toHaveLength(0);
+});
+
+test('no false positive: enum with constant identifier value', () => {
+    // enum member whose value references another identifier
+    const code = `enum ERef { BASE = 100, DERIVED = BASE };`;
+    const doc = TextDocument.create('file:///test.enscript', 'enscript', 1, code);
+    const ast = parse(doc);
+    const enumNode = ast.body[0] as any;
+    // BASE is consumed as value expression for DERIVED, not as a false member
+    expect(enumNode.members.map((m: any) => m.name)).toEqual(['BASE', 'DERIVED']);
+    expect(ast.diagnostics.filter(d => d.message.includes('semicolon'))).toHaveLength(0);
+});
+
 // ── Return statement detection tests ──────────────────────────────────────
 
 test('detects return statements in function bodies', () => {
@@ -423,6 +678,144 @@ class B { float y; };`;
     const classNames = ast.body.filter((n: any) => n.kind === 'ClassDecl').map((n: any) => n.name);
     expect(classNames).toContain('A');
     expect(classNames).toContain('B');
+});
+
+// ============================================================================
+// bodyIdentifierRefs tests
+// ============================================================================
+
+test('bodyIdentifierRefs: captures standalone identifiers in function body', () => {
+    const code = `class Foo {
+    void DoStuff() {
+        int x = someValue;
+        if (rpc_type != NOTIFICATIONS_RPC_CONFIG) {
+            return;
+        }
+    }
+};`;
+    const doc = TextDocument.create('file:///test.enscript', 'enscript', 1, code);
+    const ast = parse(doc);
+    const cls = ast.body[0] as any;
+    const func = cls.members[0] as any;
+    const refNames = func.bodyIdentifierRefs.map((r: any) => r.name);
+    expect(refNames).toContain('someValue');
+    expect(refNames).toContain('rpc_type');
+    expect(refNames).toContain('NOTIFICATIONS_RPC_CONFIG');
+});
+
+test('bodyIdentifierRefs: excludes member access after dot', () => {
+    const code = `class Foo {
+    void DoStuff() {
+        obj.field = 1;
+        obj.Method();
+    }
+};`;
+    const doc = TextDocument.create('file:///test.enscript', 'enscript', 1, code);
+    const ast = parse(doc);
+    const cls = ast.body[0] as any;
+    const func = cls.members[0] as any;
+    const refNames = func.bodyIdentifierRefs.map((r: any) => r.name);
+    // obj is captured (standalone), but field and Method are after '.' so excluded
+    expect(refNames).toContain('obj');
+    expect(refNames).not.toContain('field');
+    expect(refNames).not.toContain('Method');
+});
+
+test('bodyIdentifierRefs: excludes function call targets', () => {
+    const code = `class Foo {
+    void DoStuff() {
+        DoSomething();
+        int x = GetValue();
+    }
+};`;
+    const doc = TextDocument.create('file:///test.enscript', 'enscript', 1, code);
+    const ast = parse(doc);
+    const cls = ast.body[0] as any;
+    const func = cls.members[0] as any;
+    const refNames = func.bodyIdentifierRefs.map((r: any) => r.name);
+    // Function call targets (followed by '(') are excluded
+    expect(refNames).not.toContain('DoSomething');
+    expect(refNames).not.toContain('GetValue');
+});
+
+test('bodyIdentifierRefs: captures static access targets (validated separately by bodyTypeRefs)', () => {
+    const code = `class Foo {
+    void DoStuff() {
+        int x = SomeClass.CONSTANT;
+        SomeEnum.VALUE;
+    }
+};`;
+    const doc = TextDocument.create('file:///test.enscript', 'enscript', 1, code);
+    const ast = parse(doc);
+    const cls = ast.body[0] as any;
+    const func = cls.members[0] as any;
+    const refNames = func.bodyIdentifierRefs.map((r: any) => r.name);
+    // Identifiers followed by '.' ARE captured; they won't produce false positives
+    // because checkBodyIdentifierRefs resolves them via findClassByName/findEnumByName.
+    // The bodyTypeRefs system handles their cross-module checks separately.
+    expect(refNames).toContain('SomeClass');
+    expect(refNames).toContain('SomeEnum');
+    // Members after '.' are NOT captured (prevPrev is '.')
+    expect(refNames).not.toContain('CONSTANT');
+    expect(refNames).not.toContain('VALUE');
+});
+
+test('bodyIdentifierRefs: captures identifiers in expressions with operators', () => {
+    const code = `class Foo {
+    void DoStuff() {
+        int result = a + b * c;
+    }
+};`;
+    const doc = TextDocument.create('file:///test.enscript', 'enscript', 1, code);
+    const ast = parse(doc);
+    const cls = ast.body[0] as any;
+    const func = cls.members[0] as any;
+    const refNames = func.bodyIdentifierRefs.map((r: any) => r.name);
+    expect(refNames).toContain('a');
+    expect(refNames).toContain('b');
+    expect(refNames).toContain('c');
+});
+
+test('bodyIdentifierRefs: deduplicates identical names', () => {
+    const code = `class Foo {
+    void DoStuff() {
+        int x = val;
+        int y = val;
+    }
+};`;
+    const doc = TextDocument.create('file:///test.enscript', 'enscript', 1, code);
+    const ast = parse(doc);
+    const cls = ast.body[0] as any;
+    const func = cls.members[0] as any;
+    const valRefs = func.bodyIdentifierRefs.filter((r: any) => r.name === 'val');
+    expect(valRefs.length).toBe(1);
+});
+
+test('bodyIdentifierRefs: excludes scope resolution (::) targets', () => {
+    const code = `class Foo {
+    void DoStuff() {
+        Scope::Method();
+    }
+};`;
+    const doc = TextDocument.create('file:///test.enscript', 'enscript', 1, code);
+    const ast = parse(doc);
+    const cls = ast.body[0] as any;
+    const func = cls.members[0] as any;
+    const refNames = func.bodyIdentifierRefs.map((r: any) => r.name);
+    // 'Method' is after '::' so excluded
+    expect(refNames).not.toContain('Method');
+});
+
+test('bodyIdentifierRefs: works for top-level functions', () => {
+    const code = `void GlobalFunc() {
+    int x = SOME_CONST;
+    return;
+}`;
+    const doc = TextDocument.create('file:///test.enscript', 'enscript', 1, code);
+    const ast = parse(doc);
+    const func = ast.body[0] as any;
+    const refNames = func.bodyIdentifierRefs.map((r: any) => r.name);
+    expect(refNames).toContain('SOME_CONST');
 });
 
 test('playground', () => {

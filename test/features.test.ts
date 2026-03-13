@@ -773,6 +773,35 @@ describe('sealed class inheritance', () => {
         expect(diags.some(d => d.message.includes('abstract') && d.message.includes('sealed'))).toBe(true);
     });
 
+    test('runDiagnostics does not flag later comma-separated locals as unknown identifiers', () => {
+        const analyzer = freshAnalyzer();
+
+        // Unknown-symbol checks (checkBodyIdentifierRefs) only run when
+        // docCache.size >= MIN_FILES_FOR_UNKNOWN_TYPE_CHECK (500).
+        for (let i = 0; i < 501; i++) {
+            indexDoc(analyzer, `class Dummy${i} { };`, `file:///dummy${i}.enscript`);
+        }
+
+        const { doc } = indexDoc(
+            analyzer,
+            `class Foo {
+    static string GetDateSafe() {
+        int yr, mth, day;
+        GetYearMonthDay(yr, mth, day);
+        return yr.ToString() + "-" + mth.ToString() + "-" + day.ToString();
+    }
+};`,
+            'file:///comma-locals.enscript'
+        );
+
+        const diags = analyzer.runDiagnostics(doc);
+        const unknownDiags = diags.filter(d => d.message.includes('Unknown identifier'));
+
+        expect(unknownDiags.some(d => d.message.includes("'yr'"))).toBe(false);
+        expect(unknownDiags.some(d => d.message.includes("'mth'"))).toBe(false);
+        expect(unknownDiags.some(d => d.message.includes("'day'"))).toBe(false);
+    });
+
     test('sealed class check in runDiagnostics detects inheritance violation', () => {
         // This test verifies the check in checkUnknownSymbols which requires
         // docCache.size >= MIN_INDEX_SIZE_FOR_TYPE_CHECKS (100).

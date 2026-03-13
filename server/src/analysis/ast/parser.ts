@@ -163,6 +163,13 @@ export interface ReturnStatementInfo {
     exprEnd: number;          // Character offset of expression end (before ';')
 }
 
+/** A standalone identifier reference found in a function body expression */
+export interface BodyIdentifierRef {
+    name: string;
+    start: Position;
+    end: Position;
+}
+
 export interface FunctionDeclNode extends SymbolNodeBase {
     kind: 'FunctionDecl';
     parameters: VarDeclNode[];
@@ -172,6 +179,7 @@ export interface FunctionDeclNode extends SymbolNodeBase {
     hasBody: boolean;                          // true if function has a { } body (not proto/native)
     isOverride: boolean;                       // true if declared with the 'override' keyword
     bodyTypeRefs: TypeNode[];                  // Type references found in the body (e.g., static call targets: ClassName.Method())
+    bodyIdentifierRefs: BodyIdentifierRef[];   // Standalone identifiers in expressions (for unknown-symbol checking)
 }
 
 export interface File {
@@ -546,6 +554,27 @@ export function parse(
                         start: doc.positionAt(enumMemberNameTok.start),
                         end: doc.positionAt(enumMemberNameTok.end),
                     } as EnumMemberDeclNode);
+
+                    while (!eof()) {
+                        const enumSepTok = peek();
+                        if (enumSepTok.value === ',') {
+                            next();
+                            break;
+                        }
+                        if (enumSepTok.value === '}') {
+                            break;
+                        }
+                        if (enumSepTok.value === ';') {
+                            addDiagnostic(
+                                enumSepTok,
+                                'Enum members must be separated by commas, not semicolons.',
+                                DiagnosticSeverity.Error
+                            );
+                            next();
+                            break;
+                        }
+                        next();
+                    }
                 }
                 else next();
             }
@@ -646,6 +675,8 @@ export function parse(
             const locals: VarDeclNode[] = [];
             const returnStatements: ReturnStatementInfo[] = [];
             const bodyTypeRefs: TypeNode[] = [];
+            const bodyIdentifierRefs: BodyIdentifierRef[] = [];
+            const seenIdentifierRefs = new Set<string>(); // dedup
             let hasBody = false;
             if (peek().value === '{') {
                 hasBody = true;
@@ -662,6 +693,11 @@ export function parse(
                 let prevPrevIdx = -1;
                 let prev: Token | null = null;
                 let prevIdx = -1;
+                // Track the type token for comma-separated multi-variable declarations
+                // e.g., `float textX, textY, textZ;` — after detecting textX via the
+                // normal TypeName VarName pattern, commaChainTypeTok remembers `float`
+                // so that textY and textZ are also registered as locals.
+                let commaChainTypeTok: Token | null = null;
                 while (depth > 0 && !eof()) {
                     const t = next();
                     const tIdx = pos - 1; // index of the token that next() just returned
@@ -793,6 +829,14 @@ export function parse(
                     // Valid generic types like `array<int>` never span these boundaries.
                     if (prev && prevPrev && (t.value === ';' || t.value === '=' || t.value === ',' || t.value === ':' || t.value === '[')) {
                         let typeTok = prevPrev;
+                        // Check for comma-separated continuation: `float a, b, c;`
+                        // When prevPrev is ',' and we have a stored type from the chain,
+                        // use that type instead of trying to interpret ',' as a type token.
+                        let isCommaChain = false;
+                        if (prevPrev.value === ',' && commaChainTypeTok && prev.kind === TokenKind.Identifier) {
+                            typeTok = commaChainTypeTok;
+                            isCommaChain = true;
+                        }
                         if (prevPrev.value === '>' || prevPrev.value === '>>') {
                             // Walk backwards through tokens to find matching '<' and the type before it
                             // '>>' counts as 2 closing brackets (nested generics)
@@ -825,7 +869,7 @@ export function parse(
                                 }
                             }
                         }
-                        const isTypeTok = typeTok.kind === TokenKind.Identifier
+                        const isTypeTok = isCommaChain || typeTok.kind === TokenKind.Identifier
                             || (typeTok.kind === TokenKind.Keyword && isPrimitiveType(typeTok.value));
                         const isNameTok = prev.kind === TokenKind.Identifier;
                         if (isTypeTok && isNameTok) {
@@ -854,6 +898,16 @@ export function parse(
                             if (bodyScopes.length > 0) {
                                 bodyScopes[bodyScopes.length - 1].push(local);
                             }
+                            // Continue or end the comma chain
+                            commaChainTypeTok = (t.value === ',') ? typeTok : null;
+                        } else {
+                            // Not a valid declaration — reset comma chain
+                            commaChainTypeTok = null;
+                        }
+                    } else {
+                        // Reset comma chain on any non-declaration trigger
+                        if (t.value === ';' || t.value === '{' || t.value === '}') {
+                            commaChainTypeTok = null;
                         }
                     }
 
@@ -886,6 +940,32 @@ export function parse(
                         }
                     }
 
+                    // ================================================================
+                    // STANDALONE IDENTIFIER REFERENCE DETECTION
+                    // ================================================================
+                    // Capture identifiers used as values in expressions (not types,
+                    // not call targets, not member-access chains). Used by
+                    // checkUnknownSymbols to flag unresolvable references.
+                    //
+                    // We capture an identifier when it is NOT:
+                    //   - preceded by '.' (member access: obj.field)
+                    //   - followed by '(' (function call: Func())
+                    //   - followed by '.' (static access: Class.Method, tracked by bodyTypeRefs)
+                    //   - a keyword (if, return, new, etc.)
+                    //   - part of a declaration (Type VarName handled by local detection)
+                    // ================================================================
+                    if (prev && prev.kind === TokenKind.Identifier
+                        && (!prevPrev || (prevPrev.value !== '.' && prevPrev.value !== '::'))
+                        && t.value !== '('
+                        && !seenIdentifierRefs.has(prev.value)) {
+                        seenIdentifierRefs.add(prev.value);
+                        bodyIdentifierRefs.push({
+                            name: prev.value,
+                            start: doc.positionAt(prev.start),
+                            end: doc.positionAt(prev.end),
+                        });
+                    }
+
                     prevPrev = prev;
                     prevPrevIdx = prevIdx;
                     prev = t;
@@ -904,6 +984,7 @@ export function parse(
                 locals: locals,
                 returnStatements: returnStatements,
                 bodyTypeRefs: bodyTypeRefs,
+                bodyIdentifierRefs: bodyIdentifierRefs,
                 hasBody: hasBody,
                 isOverride: mods.includes('override'),
                 annotations: annotations,

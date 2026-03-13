@@ -1,0 +1,5 @@
+[SERVER STARTED] 2026-03-13T17:27:04.315Z
+[runDiagnostics] uri=file:///d%3A/Github/enscript/test/3_game/test_enscript.c
+[runDiagnostics] uri=file:///d%3A/Github/enscript/test/3_game/test_enscript.c
+[runDiagnostics] uri=file:///d%3A/Github/enscript/test/3_game/test_enscript.c
+[checkUnknownSymbols] uri=undefined docCache.size=2905

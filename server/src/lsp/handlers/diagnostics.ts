@@ -7,6 +7,8 @@ import {
 } from 'vscode-languageserver';
 import { TextDocument } from 'vscode-languageserver-textdocument';
 import { Analyzer } from '../../analysis/project/graph';
+import * as fs from 'node:fs';
+import * as url from 'node:url';
 
 export function registerDiagnostics(conn: Connection, docs: TextDocuments<TextDocument>): void {
     const analyser = Analyzer.instance();
@@ -58,5 +60,30 @@ export function registerDiagnostics(conn: Connection, docs: TextDocuments<TextDo
                 conn.sendDiagnostics({ uri, diagnostics });
             }
         }, DEBOUNCE_MS));
+    });
+
+    docs.onDidClose((change) => {
+        const uri = change.document.uri;
+        const pending = debounceTimers.get(uri);
+        if (pending) {
+            clearTimeout(pending);
+            debounceTimers.delete(uri);
+        }
+
+        // When a file is closed after a rename or deletion, the old URI's
+        // symbols are still in the index causing duplicate warnings.
+        // Check if the file still exists on disk — if not, clean up immediately
+        // instead of waiting for the (potentially delayed) file watcher event.
+        if (uri.startsWith('file:')) {
+            try {
+                const filePath = url.fileURLToPath(uri);
+                if (!fs.existsSync(filePath)) {
+                    analyser.removeFromIndex(uri);
+                    conn.sendDiagnostics({ uri, diagnostics: [] });
+                }
+            } catch {
+                // Ignore URI parsing errors for non-file schemes
+            }
+        }
     });
 }

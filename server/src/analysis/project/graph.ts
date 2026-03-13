@@ -6807,6 +6807,109 @@ export class Analyzer {
             }
         };
         
+        // Built-in identifiers that are always valid in expressions
+        const builtinIdentifiers = new Set([
+            'null', 'NULL', 'true', 'false', 'this', 'super',
+            'typename', 'string', 'int', 'float', 'bool', 'vector',
+            'auto', 'void', 'array', 'set', 'map',
+        ]);
+        
+        // Pre-collect all enum member names for fast lookup
+        const allEnumMembers = new Set<string>();
+        for (const [, enumNode] of this.enumIndex) {
+            for (const member of enumNode.members || []) {
+                if (member.name) allEnumMembers.add(member.name);
+            }
+        }
+        // Also include enum members from the current file's AST (in case not yet indexed)
+        for (const node of ast.body) {
+            if (node.kind === 'EnumDecl') {
+                for (const member of (node as EnumDeclNode).members || []) {
+                    if (member.name) allEnumMembers.add(member.name);
+                }
+            }
+        }
+        
+        // Check whether an identifier used in a function body resolves to a known symbol.
+        // containingClassName is set when the function is a class method.
+        const checkBodyIdentifierRefs = (func: FunctionDeclNode, containingClassName: string | null): void => {
+            if (!func.bodyIdentifierRefs || func.bodyIdentifierRefs.length === 0) return;
+            
+            // Build a set of locally-visible names for this function
+            const localNames = new Set<string>();
+            
+            // Parameters
+            for (const param of func.parameters || []) {
+                if (param.name) localNames.add(param.name);
+            }
+            // Locals
+            for (const local of func.locals || []) {
+                if (local.name) localNames.add(local.name);
+            }
+            
+            // Class members (own + inherited) if inside a class
+            if (containingClassName) {
+                const hierarchy = this.getClassHierarchyOrdered(containingClassName, new Set());
+                for (const cls of hierarchy) {
+                    for (const member of cls.members || []) {
+                        if (member.name) localNames.add(member.name);
+                    }
+                }
+            }
+            
+            for (const ref of func.bodyIdentifierRefs) {
+                const name = ref.name;
+                
+                // Skip built-ins and primitives
+                if (builtinIdentifiers.has(name)) continue;
+                if (primitives.has(name)) continue;
+                if (genericParams.has(name)) continue;
+                
+                // Skip if it's a locally visible name
+                if (localNames.has(name)) continue;
+                
+                // Skip if it's a known enum member (bare access is valid in Enforce Script)
+                if (allEnumMembers.has(name)) continue;
+                
+                // Skip if it's a known class, enum, or function name
+                if (this.findClassByName(name)) continue;
+                if (this.findEnumByName(name)) continue;
+                if (this.functionIndex.has(name)) continue;
+                
+                // Skip if it's in the global symbol index
+                if (this.globalSymbolIndex.has(name)) continue;
+                
+                // Skip if it matches any top-level name in any cached file
+                let foundInCache = false;
+                for (const [, fileAst] of this.docCache) {
+                    for (const node of fileAst.body) {
+                        if (node.name === name) {
+                            foundInCache = true;
+                            break;
+                        }
+                    }
+                    if (foundInCache) break;
+                }
+                if (foundInCache) continue;
+                
+                // Also check current file's AST
+                let foundInCurrentFile = false;
+                for (const node of ast.body) {
+                    if (node.name === name) {
+                        foundInCurrentFile = true;
+                        break;
+                    }
+                }
+                if (foundInCurrentFile) continue;
+                
+                diags.push({
+                    message: `Unknown identifier '${name}'`,
+                    range: { start: ref.start, end: ref.end },
+                    severity: DiagnosticSeverity.Warning
+                });
+            }
+        };
+        
         // Walk the AST
         for (const node of ast.body) {
             // Check class declarations
@@ -6848,6 +6951,8 @@ export class Analyzer {
                         for (const ref of func.bodyTypeRefs || []) {
                             checkBodyTypeRef(ref);
                         }
+                        // Check unknown identifiers in body expressions
+                        checkBodyIdentifierRefs(func, classNode.name);
                     }
                 }
             }
@@ -6871,6 +6976,8 @@ export class Analyzer {
                 for (const ref of func.bodyTypeRefs || []) {
                     checkBodyTypeRef(ref);
                 }
+                // Check unknown identifiers in body expressions
+                checkBodyIdentifierRefs(func, null);
             }
         }
 
