@@ -6202,9 +6202,16 @@ export class Analyzer {
                 // before the type name is '{', ';', or start-of-line, it's a declaration
                 const fullMatch = declCheck[0]; // includes trailing whitespace
                 // Skip if it looks like a declaration context (not preceded by = or , or ( )
-                const preDeclText = text.substring(Math.max(0, match.index - 80), match.index - fullMatch.length).trimEnd();
-                const lastChar = preDeclText[preDeclText.length - 1];
-                if (!lastChar || lastChar === '{' || lastChar === '}' || lastChar === ';' || lastChar === ')' || lastChar === '\n') {
+                const preDeclPos = match.index - fullMatch.length;
+                const preDeclText = text.substring(Math.max(0, preDeclPos - 80), preDeclPos);
+                const trimmed = preDeclText.trimEnd();
+                const lastChar = trimmed[trimmed.length - 1];
+                // Check if there's a newline between the end of preDeclText and the type name.
+                // This catches the case where the declaration starts on its own line
+                // (indentation after a comment line would trim away the newline otherwise).
+                const betweenContent = preDeclText.substring(trimmed.length);
+                const hasNewline = betweenContent.includes('\n');
+                if (!lastChar || lastChar === '{' || lastChar === '}' || lastChar === ';' || lastChar === ')' || hasNewline) {
                     continue; // It's a declaration, skip
                 }
             }
