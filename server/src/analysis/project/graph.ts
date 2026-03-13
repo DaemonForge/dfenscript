@@ -46,6 +46,47 @@ import { normalizeUri } from '../../util/uri';
 import { DiagnosticEngine } from '../diagnostics/engine';
 import * as url from 'node:url';
 
+/**
+ * Native engine constants (undocumented ints baked into the DayZ engine).
+ * These are not declared in any script file but are valid identifiers.
+ * Add new entries here as they are discovered.
+ */
+const NATIVE_ENGINE_CONSTANTS: readonly string[] = [
+    // Input action constants
+    'UAUIBack', 'UAAimRight', 'UAAimLeft', 'UALookAround', 'UAGetOver',
+    'UAMoveForward', 'UAMoveBack', 'UAReloadMagazine', 'UAUISelect',
+    'UATurbo', 'UAWalkRunTemp','UAGear','UAUIMenu','UADefaultAction',
+    'UATempRaiseWeapon','UAAction','UASwitchPreset', 'UAUICtrlX', 'UAUICtrlY',
+    'UAUICombine','UAUIRotateInventory','UAMapToggle','UAChat', 'UAGear',
+    'UAVoiceDistanceUp', 'UAVoiceDistanceDown','UAZoomInOptics', 'UALeanLeft',
+    'UALeanRight', 'UAZoomInOpticsControllerHelper', 'UAZoomOutOptics',
+    'UAZoomOutOpticsControllerHelper', 'UAAimDown', 'UAAimUp', 'UAToggleWeapons',
+    'UACarShiftGearUp', 'UACarShiftGearDown', 'UAUITabLeft', 'UAUITabRight',
+    'UAUIThumbRight','UAUIRight', 'UAUILeft','UAUIGesturesOpen', 
+    'UAUIQuickbarToggle','UAWalkRunForced','UAMoveRight', 'UAMoveLeft',
+    'UAUICopyDebugMonitorPos','UAPersonView','UAUICredits',
+    // Dialog / UI constants
+    'DT_CUSTOM', 'DBT_OK', 'DBB_NONE', 'DMT_INFO', 'CT_CLASS',
+    'DBT_YESNOCANCEL', 'DBB_YES', 'DBB_NO', 'DBB_CANCEL', 'CT_ARRAY',
+    'DMT_QUESTION', 'DBT_YESNO',
+    // Object intersection constants
+    'ObjIntersectFire', 'ObjIntersectView', 'ObjIntersectGeom',
+    'ObjIntersectIFire', 'ObjIntersectNone',
+    // Options constants
+    'OPTIONS_FIELD_OF_VIEW_MIN', 'OPTIONS_FIELD_OF_VIEW_MAX',
+    // Input device constants
+    'EUAINPUT_DEVICE_CONTROLLER', 'EUAINPUT_DEVICE_MOUSE', 'EUAINPUT_DEVICE_KEYBOARD',
+    'EUAINPUT_DEVICE_KEYBOARDMOUSE',
+    'LOCK_FROM_SCRIPT', 'HIDE_INV_FROM_SCRIPT', 
+    //Chat Channels
+    'CCSystem', 'CCAdmin', 'CCDirect', 'CCMegaphone', 'CCTransmitter', 
+    'CCPublicAddressSystem', 'CCBattlEye', 'ChatMaxUserLength',
+    'ChatMaxSystemLength',
+    'VoiceLevelShout', 'VoiceLevelWhisper', 'VoiceLevelTalk',
+    'VoiceEffectObstruction',
+    'MB_PRESSED_MASK',
+];
+
 interface SymbolEntry {
     name: string;
     kind: 'function' | 'class' | 'variable' | 'parameter' | 'field' | 'typedef' | 'enum';
@@ -6812,6 +6853,7 @@ export class Analyzer {
             'null', 'NULL', 'true', 'false', 'this', 'super',
             'typename', 'string', 'int', 'float', 'bool', 'vector',
             'auto', 'void', 'array', 'set', 'map',
+            ...NATIVE_ENGINE_CONSTANTS,
         ]);
         
         // Pre-collect all enum member names for fast lookup

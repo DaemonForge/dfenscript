@@ -827,7 +827,11 @@ export function parse(
                     // walk back to `<` from a for-loop condition `i < tierCount`, falsely
                     // detecting `i maxSafeRadius` as a generic-typed variable declaration.
                     // Valid generic types like `array<int>` never span these boundaries.
-                    if (prev && prevPrev && (t.value === ';' || t.value === '=' || t.value === ',' || t.value === ':' || t.value === '[')) {
+                    //
+                    // '(' is included to detect constructor-style declarations:
+                    //   ScriptInputUserData serializer();
+                    // where the variable name is followed by parentheses.
+                    if (prev && prevPrev && (t.value === ';' || t.value === '=' || t.value === ',' || t.value === ':' || t.value === '[' || t.value === '(')) {
                         let typeTok = prevPrev;
                         // Check for comma-separated continuation: `float a, b, c;`
                         // When prevPrev is ',' and we have a stored type from the chain,

@@ -94,6 +94,24 @@ test('detects comma-separated local variable declarations', () => {
     expect(func.locals.find((l: any) => l.name === 'c').type.identifier).toBe('int');
 });
 
+test('detects constructor-style local variable declarations', () => {
+    const code = `class Foo {
+    void Bar() {
+        ScriptInputUserData serializer();
+        int x = 5;
+    }
+};`;
+    const doc = TextDocument.create('file:///test.enscript', 'enscript', 1, code);
+    const ast = parse(doc);
+    const cls = ast.body[0] as any;
+    const func = cls.members[0] as any;
+    const localNames = func.locals.map((l: any) => l.name);
+    expect(localNames).toContain('serializer');
+    expect(localNames).toContain('x');
+    const serializerLocal = func.locals.find((l: any) => l.name === 'serializer');
+    expect(serializerLocal.type.identifier).toBe('ScriptInputUserData');
+});
+
 test('comma chain does not leak across statements', () => {
     // After `int a, b;` the comma chain must reset on `;`.
     // The next statement `Foo(x, y);` must NOT treat y as a local.
