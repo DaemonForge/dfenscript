@@ -868,3 +868,220 @@ describe('sealed class inheritance', () => {
         expect(sealedError).toBeUndefined();
     });
 });
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Modded class method resolution
+// ══════════════════════════════════════════════════════════════════════════════
+
+describe('modded class method calls', () => {
+    test('method added in modded class is found via qualified call', () => {
+        const analyzer = freshAnalyzer();
+        for (let i = 0; i < 101; i++) {
+            indexDoc(analyzer, `class Dummy${i} { };`, `file:///dummy${i}.enscript`);
+        }
+        indexDoc(analyzer, `class test2 {
+    int testint1;
+    void Test2Public() { }
+};`, 'file:///test2.enscript');
+        indexDoc(analyzer, `modded class test2 {
+    bool TestModdedFunction(string e, string f, string g) {
+        return true;
+    }
+};`, 'file:///test2_modded.enscript');
+        const { doc } = indexDoc(analyzer, `class Consumer {
+    void Test() {
+        test2 t2;
+        bool tb = t2.TestModdedFunction("a", "b", "c");
+    }
+};`, 'file:///consumer.enscript');
+        const diags = analyzer.runDiagnostics(doc);
+        const unknownMethod = diags.find(d => d.message.includes("Unknown method 'TestModdedFunction'"));
+        expect(unknownMethod).toBeUndefined();
+    });
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
+// Access modifier violations (private/protected)
+// ══════════════════════════════════════════════════════════════════════════════
+
+describe('access modifier violations', () => {
+    function setupAnalyzer() {
+        const analyzer = freshAnalyzer();
+        // Index enough files to pass the threshold
+        for (let i = 0; i < 101; i++) {
+            indexDoc(analyzer, `class Dummy${i} { };`, `file:///dummy${i}.enscript`);
+        }
+        return analyzer;
+    }
+
+    test('protected field access from unrelated class produces error', () => {
+        const analyzer = setupAnalyzer();
+        indexDoc(analyzer, `class Entity {
+    protected int ObjectId;
+};`, 'file:///entity.enscript');
+        const { doc } = indexDoc(analyzer, `class TerritoryFlag {
+    void DoStuff(Entity e) {
+        int id = e.ObjectId;
+    }
+};`, 'file:///territory.enscript');
+        const diags = analyzer.runDiagnostics(doc);
+        const accessError = diags.find(d => d.message.includes("'ObjectId' is protected"));
+        expect(accessError).toBeDefined();
+    });
+
+    test('private field access from outside class produces error', () => {
+        const analyzer = setupAnalyzer();
+        indexDoc(analyzer, `class Foo {
+    private int m_secret;
+};`, 'file:///foo.enscript');
+        const { doc } = indexDoc(analyzer, `class Bar {
+    void DoStuff(Foo f) {
+        int x = f.m_secret;
+    }
+};`, 'file:///bar.enscript');
+        const diags = analyzer.runDiagnostics(doc);
+        const accessError = diags.find(d => d.message.includes("'m_secret' is private"));
+        expect(accessError).toBeDefined();
+    });
+
+    test('protected field access from subclass is OK', () => {
+        const analyzer = setupAnalyzer();
+        indexDoc(analyzer, `class Entity {
+    protected int ObjectId;
+};`, 'file:///entity.enscript');
+        const { doc } = indexDoc(analyzer, `class TerritoryFlag extends Entity {
+    void DoStuff(Entity e) {
+        int id = e.ObjectId;
+    }
+};`, 'file:///territory.enscript');
+        const diags = analyzer.runDiagnostics(doc);
+        const accessError = diags.find(d => d.message.includes("'ObjectId' is protected"));
+        expect(accessError).toBeUndefined();
+    });
+
+    test('public field access produces no error', () => {
+        const analyzer = setupAnalyzer();
+        indexDoc(analyzer, `class Foo {
+    int m_value;
+};`, 'file:///foo.enscript');
+        const { doc } = indexDoc(analyzer, `class Bar {
+    void DoStuff(Foo f) {
+        int x = f.m_value;
+    }
+};`, 'file:///bar.enscript');
+        const diags = analyzer.runDiagnostics(doc);
+        const accessError = diags.find(d => d.message.includes('is private') || d.message.includes('is protected'));
+        expect(accessError).toBeUndefined();
+    });
+
+    test('private field access from same class is OK', () => {
+        const analyzer = setupAnalyzer();
+        const { doc } = indexDoc(analyzer, `class Foo {
+    private int m_secret;
+    void DoStuff(Foo other) {
+        int x = other.m_secret;
+    }
+};`, 'file:///foo.enscript');
+        const diags = analyzer.runDiagnostics(doc);
+        const accessError = diags.find(d => d.message.includes("'m_secret' is private"));
+        expect(accessError).toBeUndefined();
+    });
+
+    test('protected method call from unrelated class produces error', () => {
+        const analyzer = setupAnalyzer();
+        indexDoc(analyzer, `class Base {
+    protected void SecretMethod() { }
+    void PublicMethod() { }
+};`, 'file:///base.enscript');
+        const { doc } = indexDoc(analyzer, `class Other {
+    void DoStuff(Base b) {
+        b.PublicMethod();
+        b.SecretMethod();
+    }
+};`, 'file:///other.enscript');
+        const diags = analyzer.runDiagnostics(doc);
+        const accessError = diags.find(d => d.message.includes("'SecretMethod' is protected"));
+        expect(accessError).toBeDefined();
+        const noPublicError = diags.find(d => d.message.includes("'PublicMethod' is protected") || d.message.includes("'PublicMethod' is private"));
+        expect(noPublicError).toBeUndefined();
+    });
+
+    test('private method call from outside class produces error', () => {
+        const analyzer = setupAnalyzer();
+        indexDoc(analyzer, `class Base {
+    private void InternalMethod() { }
+};`, 'file:///base.enscript');
+        const { doc } = indexDoc(analyzer, `class Other {
+    void DoStuff(Base b) {
+        b.InternalMethod();
+    }
+};`, 'file:///other.enscript');
+        const diags = analyzer.runDiagnostics(doc);
+        const accessError = diags.find(d => d.message.includes("'InternalMethod' is private"));
+        expect(accessError).toBeDefined();
+    });
+
+    test('unqualified inherited private method call produces error', () => {
+        const analyzer = setupAnalyzer();
+        indexDoc(analyzer, `class Base {
+    private void PrivateMethod() { }
+    protected void ProtectedMethod() { }
+};`, 'file:///base.enscript');
+        const { doc } = indexDoc(analyzer, `class Child extends Base {
+    void DoStuff() {
+        ProtectedMethod();
+        PrivateMethod();
+    }
+};`, 'file:///child.enscript');
+        const diags = analyzer.runDiagnostics(doc);
+        const privateError = diags.find(d => d.message.includes("'PrivateMethod' is private"));
+        expect(privateError).toBeDefined();
+        const protectedError = diags.find(d => d.message.includes("'ProtectedMethod' is protected"));
+        expect(protectedError).toBeUndefined();
+    });
+
+    test('protected method call from subclass is OK', () => {
+        const analyzer = setupAnalyzer();
+        indexDoc(analyzer, `class Base {
+    protected void SecretMethod() { }
+};`, 'file:///base.enscript');
+        const { doc } = indexDoc(analyzer, `class Child extends Base {
+    void DoStuff(Base b) {
+        b.SecretMethod();
+    }
+};`, 'file:///child.enscript');
+        const diags = analyzer.runDiagnostics(doc);
+        const accessError = diags.find(d => d.message.includes("'SecretMethod' is protected"));
+        expect(accessError).toBeUndefined();
+    });
+
+    test('unqualified inherited private field access produces error', () => {
+        const analyzer = setupAnalyzer();
+        indexDoc(analyzer, `class Base {
+    private int secretField;
+};`, 'file:///base.enscript');
+        const { doc } = indexDoc(analyzer, `class Child extends Base {
+    void DoStuff() {
+        int x = secretField;
+    }
+};`, 'file:///child.enscript');
+        const diags = analyzer.runDiagnostics(doc);
+        const privateError = diags.find(d => d.message.includes("'secretField' is private"));
+        expect(privateError).toBeDefined();
+    });
+
+    test('unqualified inherited protected field is OK from subclass', () => {
+        const analyzer = setupAnalyzer();
+        indexDoc(analyzer, `class Base {
+    protected int protField;
+};`, 'file:///base.enscript');
+        const { doc } = indexDoc(analyzer, `class Child extends Base {
+    void DoStuff() {
+        int x = protField;
+    }
+};`, 'file:///child.enscript');
+        const diags = analyzer.runDiagnostics(doc);
+        const accessError = diags.find(d => d.message.includes("'protField' is protected"));
+        expect(accessError).toBeUndefined();
+    });
+});

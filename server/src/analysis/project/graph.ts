@@ -3989,6 +3989,9 @@ export class Analyzer {
             // Check function call arguments (param count and types)
             this.checkFunctionCallArgs(doc, diags, text, lines, lineOffsets, ast, scopedVars);
             
+            // Check access modifier violations (private/protected member access)
+            this.checkAccessModifierViolations(doc, diags, text, lines, lineOffsets, ast, scopedVars);
+            
             // Check return statements: missing returns in non-void functions
             // and return type mismatches (including downcast warnings)
             this.checkReturnStatements(doc, diags, text, lineOffsets, ast, scopedVars);
@@ -6455,6 +6458,211 @@ export class Analyzer {
                     range: { start: startPos, end: endPos },
                     severity: result.severity === 'error' ? DiagnosticSeverity.Error : DiagnosticSeverity.Warning
                 });
+            }
+        }
+    }
+
+    /**
+     * Check for access modifier violations (private/protected member access).
+     * Scans function bodies for `obj.member` patterns and verifies that the
+     * accessed member's visibility permits the access from the current context.
+     * 
+     * Rules (matching DayZ Enforce Script engine):
+     *   - private: only accessible within the declaring class
+     *   - protected: accessible within the declaring class and subclasses
+     *   - public / no modifier: accessible from anywhere
+     */
+    private checkAccessModifierViolations(
+        doc: TextDocument,
+        diags: Diagnostic[],
+        text: string,
+        lines: string[],
+        lineOffsets: number[],
+        ast: File,
+        scopedVars: Map<string, { type: string; startLine: number; endLine: number; isClassField: boolean }[]>
+    ): void {
+        // Variable type lookup (same helper used by other checkers)
+        const getVarTypeAtLine = (name: string, line: number): string | undefined => {
+            const entries = scopedVars.get(name);
+            if (entries) {
+                let best: { type: string; startLine: number; endLine: number } | undefined;
+                for (const e of entries) {
+                    if (line >= e.startLine && line <= e.endLine) {
+                        if (!best || (e.endLine - e.startLine) < (best.endLine - best.startLine)) {
+                            best = e;
+                        }
+                    }
+                }
+                if (best) return best.type;
+            }
+            const pos: Position = { line, character: 0 };
+            return this.resolveVariableType(doc, pos, name) ?? undefined;
+        };
+
+        // Helper: check access and push diagnostic if violated
+        const checkAccess = (
+            memberNode: SymbolNodeBase,
+            memberName: string,
+            declaringClassName: string,
+            containingClassName: string | null,
+            memberStart: number,
+            kind: 'Variable' | 'Method'
+        ): void => {
+            const isPrivate = memberNode.modifiers?.includes('private');
+            const isProtected = memberNode.modifiers?.includes('protected');
+            if (!isPrivate && !isProtected) return;
+
+            if (isPrivate) {
+                if (containingClassName !== declaringClassName) {
+                    const startPos = doc.positionAt(memberStart);
+                    const endPos = doc.positionAt(memberStart + memberName.length);
+                    diags.push({
+                        message: `${kind} '${memberName}' is private and cannot be accessed from '${containingClassName || 'global scope'}'`,
+                        range: { start: startPos, end: endPos },
+                        severity: DiagnosticSeverity.Error
+                    });
+                }
+            } else if (isProtected) {
+                if (!containingClassName) {
+                    const startPos = doc.positionAt(memberStart);
+                    const endPos = doc.positionAt(memberStart + memberName.length);
+                    diags.push({
+                        message: `${kind} '${memberName}' is protected and cannot be accessed from global scope`,
+                        range: { start: startPos, end: endPos },
+                        severity: DiagnosticSeverity.Error
+                    });
+                } else if (containingClassName !== declaringClassName) {
+                    const currentHierarchy = this.getClassHierarchyOrdered(containingClassName, new Set());
+                    const isSubclass = currentHierarchy.some(cls => cls.name === declaringClassName);
+                    if (!isSubclass) {
+                        const startPos = doc.positionAt(memberStart);
+                        const endPos = doc.positionAt(memberStart + memberName.length);
+                        diags.push({
+                            message: `${kind} '${memberName}' is protected and cannot be accessed from '${containingClassName}'`,
+                            range: { start: startPos, end: endPos },
+                            severity: DiagnosticSeverity.Error
+                        });
+                    }
+                }
+            }
+        };
+
+        // Helper: find a member and its declaring class in a type hierarchy
+        const findMemberInHierarchy = (typeName: string, memberName: string): { node: SymbolNodeBase; declaringClass: string } | null => {
+            const hierarchy = this.getClassHierarchyOrdered(typeName, new Set());
+            for (const cls of hierarchy) {
+                for (const member of cls.members || []) {
+                    if (member.name === memberName) {
+                        return { node: member, declaringClass: cls.name };
+                    }
+                }
+            }
+            return null;
+        };
+
+        // ── 1. Qualified access: obj.member and obj.Method() ──────────────
+        // Match obj.member (both field access and method calls)
+        const memberAccessPattern = /\b(\w+)\s*\.\s*(\w+)\b/g;
+        let match: RegExpExecArray | null;
+
+        while ((match = memberAccessPattern.exec(text)) !== null) {
+            if (Analyzer.isInsideCommentOrStringAt(text, match.index)) continue;
+
+            const objName = match[1];
+            const memberName = match[2];
+            const memberStart = match.index + match[0].indexOf(memberName);
+            const lineNum = Analyzer.getLineFromOffset(lineOffsets, match.index);
+            const containingClass = this.findContainingClass(ast, { line: lineNum, character: 0 });
+            const containingClassName = containingClass?.name ?? null;
+
+            if (objName === 'this' || objName === 'super') continue;
+
+            let objType: string | undefined;
+            objType = getVarTypeAtLine(objName, lineNum);
+            if (objType) {
+                objType = this.resolveTypedef(objType);
+            }
+            if (!objType && objName[0] === objName[0].toUpperCase() && this.classIndex.has(objName)) {
+                objType = objName;
+            }
+            if (!objType) continue;
+
+            const found = findMemberInHierarchy(objType, memberName);
+            if (!found) continue;
+
+            const isMethod = found.node.kind === 'FunctionDecl';
+            checkAccess(found.node, memberName, found.declaringClass, containingClassName, memberStart, isMethod ? 'Method' : 'Variable');
+        }
+
+        // ── 2. Unqualified access to inherited private/protected members ──
+        // Inside a class method, accessing InheritedMethod() or inherited
+        // fields without qualifier still needs to respect their access level.
+        for (const node of ast.body) {
+            if (node.kind !== 'ClassDecl') continue;
+            const classNode = node as ClassDeclNode;
+
+            // Collect own member names (fields + methods defined in THIS class)
+            const ownMembers = new Set<string>();
+            for (const m of classNode.members || []) {
+                if (m.name) ownMembers.add(m.name);
+            }
+
+            for (const member of classNode.members || []) {
+                if (member.kind !== 'FunctionDecl') continue;
+                const func = member as FunctionDeclNode;
+                if (!func.hasBody) continue;
+
+                // Check unqualified method calls: FuncName(
+                const funcStartOffset = doc.offsetAt(func.start);
+                const funcEndOffset = doc.offsetAt(func.end);
+                const bodyText = text.substring(funcStartOffset, funcEndOffset);
+                const callPattern = /\b(\w+)\s*\(/g;
+                let callMatch: RegExpExecArray | null;
+
+                while ((callMatch = callPattern.exec(bodyText)) !== null) {
+                    const callName = callMatch[1];
+                    const absOffset = funcStartOffset + callMatch.index;
+                    if (Analyzer.isInsideCommentOrStringAt(text, absOffset)) continue;
+
+                    // Skip if preceded by '.' or '::' (qualified call — handled above)
+                    const charBefore = absOffset > 0 ? text[absOffset - 1] : '';
+                    if (charBefore === '.') continue;
+                    if (absOffset > 1 && text[absOffset - 2] === ':' && text[absOffset - 1] === ':') continue;
+
+                    // Skip if this is a member defined in the current class itself
+                    if (ownMembers.has(callName)) continue;
+
+                    // Skip keywords / built-ins
+                    if (keywords.has(callName)) continue;
+
+                    // Check if this is an inherited method with access restrictions
+                    const found = findMemberInHierarchy(classNode.name, callName);
+                    if (!found || found.node.kind !== 'FunctionDecl') continue;
+
+                    checkAccess(found.node, callName, found.declaringClass, classNode.name, absOffset, 'Method');
+                }
+
+                // Check unqualified field references via bodyIdentifierRefs
+                if (func.bodyIdentifierRefs) {
+                    // Build set of locals + params that shadow inherited names
+                    const localNames = new Set<string>();
+                    for (const p of func.parameters || []) { if (p.name) localNames.add(p.name); }
+                    for (const l of func.locals || []) { if (l.name) localNames.add(l.name); }
+
+                    for (const ref of func.bodyIdentifierRefs) {
+                        // Skip if it's an own member of this class
+                        if (ownMembers.has(ref.name)) continue;
+
+                        // Skip if shadowed by a local variable or parameter
+                        if (localNames.has(ref.name)) continue;
+
+                        // Check if this is an inherited field with access restrictions
+                        const found = findMemberInHierarchy(classNode.name, ref.name);
+                        if (!found || found.node.kind !== 'VarDecl') continue;
+
+                        checkAccess(found.node, ref.name, found.declaringClass, classNode.name, doc.offsetAt(ref.start), 'Variable');
+                    }
+                }
             }
         }
     }

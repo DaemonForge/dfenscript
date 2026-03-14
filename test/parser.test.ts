@@ -112,6 +112,25 @@ test('detects constructor-style local variable declarations', () => {
     expect(serializerLocal.type.identifier).toBe('ScriptInputUserData');
 });
 
+test('detects comma-separated locals with initializers', () => {
+    const code = `class Foo {
+    void Bar() {
+        float x = 0, y = 0, z = 0;
+    }
+};`;
+    const doc = TextDocument.create('file:///test.enscript', 'enscript', 1, code);
+    const ast = parse(doc);
+    const cls = ast.body[0] as any;
+    const func = cls.members[0] as any;
+    const localNames = func.locals.map((l: any) => l.name);
+    expect(localNames).toContain('x');
+    expect(localNames).toContain('y');
+    expect(localNames).toContain('z');
+    expect(func.locals.find((l: any) => l.name === 'x').type.identifier).toBe('float');
+    expect(func.locals.find((l: any) => l.name === 'y').type.identifier).toBe('float');
+    expect(func.locals.find((l: any) => l.name === 'z').type.identifier).toBe('float');
+});
+
 test('comma chain does not leak across statements', () => {
     // After `int a, b;` the comma chain must reset on `;`.
     // The next statement `Foo(x, y);` must NOT treat y as a local.
@@ -834,6 +853,74 @@ test('bodyIdentifierRefs: works for top-level functions', () => {
     const func = ast.body[0] as any;
     const refNames = func.bodyIdentifierRefs.map((r: any) => r.name);
     expect(refNames).toContain('SOME_CONST');
+});
+
+test('comma chain does not propagate into function call arguments', () => {
+    // `bool hit = Func(a, b, hitPosition, c);` — the comma chain from `bool hit =`
+    // must NOT leak into the function call parens. Arguments like hitPosition
+    // must NOT be falsely detected as bool locals.
+    const code = `class Foo {
+    void Bar() {
+        vector hitPosition;
+        bool hit = SomeFunc(playerEyePos, targetPos, hitPosition, hitFraction);
+    }
+};`;
+    const doc = TextDocument.create('file:///test.enscript', 'enscript', 1, code);
+    const ast = parse(doc);
+    const cls = ast.body[0] as any;
+    const func = cls.members[0] as any;
+    const localNames = func.locals.map((l: any) => l.name);
+    expect(localNames).toContain('hitPosition');
+    expect(localNames).toContain('hit');
+    // The function call arguments must NOT be detected as locals
+    expect(localNames).not.toContain('targetPos');
+    expect(localNames).not.toContain('hitFraction');
+    // hitPosition must retain its declared type, not be overwritten by a false bool local
+    expect(func.locals.find((l: any) => l.name === 'hitPosition').type.identifier).toBe('vector');
+    expect(func.locals.find((l: any) => l.name === 'hit').type.identifier).toBe('bool');
+});
+
+test('comma chain survives function call in initializer', () => {
+    // `float x = Func(a, b), y = 0;` — chain must survive through parens
+    const code = `class Foo {
+    void Bar() {
+        float x = Func(a, b), y = 0;
+    }
+};`;
+    const doc = TextDocument.create('file:///test.enscript', 'enscript', 1, code);
+    const ast = parse(doc);
+    const cls = ast.body[0] as any;
+    const func = cls.members[0] as any;
+    const localNames = func.locals.map((l: any) => l.name);
+    expect(localNames).toContain('x');
+    expect(localNames).toContain('y');
+    expect(func.locals.find((l: any) => l.name === 'x').type.identifier).toBe('float');
+    expect(func.locals.find((l: any) => l.name === 'y').type.identifier).toBe('float');
+    // a and b inside the call must NOT be detected as locals
+    expect(localNames).not.toContain('a');
+    expect(localNames).not.toContain('b');
+});
+
+test('comma chain does not propagate into generic constructor call', () => {
+    // `Param3<string, string, string> testparam = new Param3<string, string, string>(e, f, g);`
+    // The comma chain from `testparam =` must NOT leak into the constructor parens.
+    // Parameters e, f, g must NOT be falsely detected as locals (which would trigger
+    // duplicate variable errors against the function parameters).
+    const code = `class Foo {
+    void TestModdedFunction(string e, string f, string g) {
+        Param3<string, string, string> testparam = new Param3<string, string, string>(e, f, g);
+    }
+};`;
+    const doc = TextDocument.create('file:///test.enscript', 'enscript', 1, code);
+    const ast = parse(doc);
+    const cls = ast.body[0] as any;
+    const func = cls.members[0] as any;
+    const localNames = func.locals.map((l: any) => l.name);
+    expect(localNames).toContain('testparam');
+    // e, f, g are parameters — they must NOT appear as locals
+    expect(localNames).not.toContain('e');
+    expect(localNames).not.toContain('f');
+    expect(localNames).not.toContain('g');
 });
 
 test('playground', () => {

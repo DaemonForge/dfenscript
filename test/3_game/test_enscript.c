@@ -48,7 +48,7 @@ class test {
 
         int testint3, testint4, testint5;
 
-        testint1 = 1;
+        int  testint1 = 1; //should flag for duplicate variable name from class variable
         testint2 = 2;
         testint3 = 3;
         testint4 = 4;
@@ -141,6 +141,22 @@ class test {
         e = testMap2.Get("string");
         f = testMap2.Get("string");
 
+
+        test2 t2;
+        t2.testint1 = 1; //Should not flag as testint1 is public
+        t2.testint2 = 1; //Should flag for protected variable access
+        t2.testint3 = 1; //Should flag for private variable access
+        t2.Test2Public();
+        t2.TestProtected(); //Should flag for protected function access
+        t2.TestPrivate(); //Should flag for private function access
+
+        string teststr = "test";
+        string teststr2 = "test";
+        string teststr3 = "test";
+
+        bool tb1 = t2.TestFunction(teststr, teststr2, teststr3);
+
+        bool tb2 = t2.TestModdedFunction(teststr, teststr2, teststr3); // should not flag as a missing function
         
     }
 
@@ -269,6 +285,63 @@ modded class testin {
 
     void testModdedFunction2(PlayerBase p, string f){ //should flag for parameter of class from 4_world and not in 3_game
 
+    }
+}
+
+
+class test2 {
+    
+    autoptr TIntArray intArray2 = {1,2,3,4,5};
+    
+    int testint1;
+    protected int testint2;
+    private int testint3;
+
+    protected void TestProtected() {
+    }
+
+    void Test2Public() {
+        
+    }
+
+    private void TestPrivate() {
+    }
+
+    bool TestFunction(string e, string f, string g) {
+        Param3<string, string, string> testparam = new Param3<string, string, string>(e, f, g);
+        return true;    
+    }
+}
+
+modded class test2 {
+
+    override void TestProtected() {
+
+    }
+
+    override void Test2Public() {
+        TestPrivate(); //Should flag for private function
+    }
+
+    //should flag can't override private function from parent class
+    override void TestPrivate() {
+
+    }   
+
+    bool TestModdedFunction(string e, string f, string g) {
+        Param3<string, string, string> testparam = new Param3<string, string, string>(e, f, g);
+        return true;    
+    }
+}
+
+class test3 extends test2 {
+
+    void Test() {
+        Test2Public();
+        TestProtected();  //should not flagged as protected functions are accessible in child classes
+        TestPrivate(); //Should flag for private function access
+        testint2 = 1; //Should not flag as protected variables are accessible in child classes
+        testint3 = 1; //Should flag for private variable access
     }
 }
 /*

@@ -698,9 +698,17 @@ export function parse(
                 // normal TypeName VarName pattern, commaChainTypeTok remembers `float`
                 // so that textY and textZ are also registered as locals.
                 let commaChainTypeTok: Token | null = null;
+                let commaChainParenDepth = 0; // paren depth at which the chain was created
+                let parenDepth = 0; // tracks () nesting to prevent false locals inside call args
                 while (depth > 0 && !eof()) {
                     const t = next();
                     const tIdx = pos - 1; // index of the token that next() just returned
+                    // Track parenthesis depth BEFORE local detection so the
+                    // comma chain check sees the correct nesting level.
+                    // This prevents `bool hit = Func(a, b, c);` from falsely
+                    // detecting the call arguments as comma-chain bool locals.
+                    if (t.value === '(') parenDepth++;
+                    else if (t.value === ')') parenDepth = Math.max(0, parenDepth - 1);
                     if (t.value === '{') {
                         depth++;
                         bodyScopes.push([]);
@@ -837,7 +845,7 @@ export function parse(
                         // When prevPrev is ',' and we have a stored type from the chain,
                         // use that type instead of trying to interpret ',' as a type token.
                         let isCommaChain = false;
-                        if (prevPrev.value === ',' && commaChainTypeTok && prev.kind === TokenKind.Identifier) {
+                        if (prevPrev.value === ',' && commaChainTypeTok && prev.kind === TokenKind.Identifier && parenDepth === commaChainParenDepth) {
                             typeTok = commaChainTypeTok;
                             isCommaChain = true;
                         }
@@ -902,11 +910,20 @@ export function parse(
                             if (bodyScopes.length > 0) {
                                 bodyScopes[bodyScopes.length - 1].push(local);
                             }
-                            // Continue or end the comma chain
-                            commaChainTypeTok = (t.value === ',') ? typeTok : null;
+                            // Continue or end the comma chain.
+                            // Keep the type alive on ',' (direct: float x, y;) and '='
+                            // (initializer: float x = 0, y = 0;) so that subsequent
+                            // comma-separated variables with assignments are detected.
+                            commaChainTypeTok = (t.value === ',' || t.value === '=') ? typeTok : null;
+                            commaChainParenDepth = parenDepth;
                         } else {
-                            // Not a valid declaration — reset comma chain
-                            commaChainTypeTok = null;
+                            // Not a valid declaration — only reset comma chain on
+                            // statement boundaries. Non-boundary triggers (like '('
+                            // inside a function call in an initializer expression)
+                            // must not kill the chain.
+                            if (t.value === ';') {
+                                commaChainTypeTok = null;
+                            }
                         }
                     } else {
                         // Reset comma chain on any non-declaration trigger
