@@ -898,6 +898,87 @@ describe('modded class method calls', () => {
         const unknownMethod = diags.find(d => d.message.includes("Unknown method 'TestModdedFunction'"));
         expect(unknownMethod).toBeUndefined();
     });
+
+    test('method added in modded class in SAME file is found', () => {
+        const analyzer = freshAnalyzer();
+        for (let i = 0; i < 101; i++) {
+            indexDoc(analyzer, `class Dummy${i} { };`, `file:///dummy${i}.enscript`);
+        }
+        const { doc } = indexDoc(analyzer, `class test2 {
+    int testint1;
+    void Test2Public() { }
+};
+
+modded class test2 {
+    bool TestModdedFunction(string e, string f, string g) {
+        return true;
+    }
+};
+
+class Consumer {
+    void Test() {
+        test2 t2;
+        bool tb = t2.TestModdedFunction("a", "b", "c");
+    }
+};`, 'file:///combined.enscript');
+        const diags = analyzer.runDiagnostics(doc);
+        const unknownMethod = diags.find(d => d.message.includes("Unknown method 'TestModdedFunction'"));
+        expect(unknownMethod).toBeUndefined();
+    });
+
+    test('same-file original+modded does not cause duplicate completions', () => {
+        const analyzer = freshAnalyzer();
+        for (let i = 0; i < 101; i++) {
+            indexDoc(analyzer, `class Dummy${i} { };`, `file:///dummy${i}.enscript`);
+        }
+        const { doc } = indexDoc(analyzer, `class Base {
+    void SharedMethod() { }
+};
+
+modded class Base {
+    override void SharedMethod() { }
+    void NewMethod() { }
+};
+
+class User {
+    void Test() {
+        Base b;
+        b.
+    }
+};`, 'file:///samefile.enscript');
+        const completions = analyzer.getCompletions(doc, pos(12, 10));
+        // SharedMethod should appear exactly once (not doubled)
+        const sharedCount = completions.filter(c => c.name === 'SharedMethod').length;
+        expect(sharedCount).toBe(1);
+        // NewMethod from modded class should still appear
+        const newMethod = completions.find(c => c.name === 'NewMethod');
+        expect(newMethod).toBeDefined();
+    });
+
+    test('same-file original+modded does not cause duplicate type mismatch errors', () => {
+        const analyzer = freshAnalyzer();
+        for (let i = 0; i < 101; i++) {
+            indexDoc(analyzer, `class Dummy${i} { };`, `file:///dummy${i}.enscript`);
+        }
+        const { doc } = indexDoc(analyzer, `class Base {
+    int GetValue() { return 0; }
+};
+
+modded class Base {
+    override int GetValue() { return 1; }
+};
+
+class Caller {
+    void Test() {
+        Base b;
+        string s = b.GetValue();
+    }
+};`, 'file:///samefile2.enscript');
+        const diags = analyzer.runDiagnostics(doc);
+        // Should get at most ONE type mismatch for the assignment, not doubled
+        const mismatches = diags.filter(d => d.message.includes('GetValue'));
+        expect(mismatches.length).toBeLessThanOrEqual(1);
+    });
 });
 
 // ══════════════════════════════════════════════════════════════════════════════

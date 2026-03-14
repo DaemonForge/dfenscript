@@ -2894,20 +2894,22 @@ export class Analyzer {
         visited.add(className);
         
         // Find all classes with this name (original + modded versions)
-        // Deduplicate by _sourceUri in case the same file was indexed under
-        // different URI casings (Windows path case-insensitivity).
-        // Also dedup by path suffix to handle the same file indexed from both
-        // the workspace and an include path under different full URIs.
+        // Deduplicate by (_sourceUri + start position) in case the same file was
+        // indexed under different URI casings (Windows path case-insensitivity).
+        // We include the start position (line:char) in the dedup key so that
+        // distinct class declarations in the SAME file (e.g., `class Foo` and
+        // `modded class Foo` in one file) are kept as separate entries.
         const rawClassNodes = this.findAllClassesByName(className);
-        const seenSourceUris = new Set<string>();
+        const seenKeys = new Set<string>();
         const classNodes: ClassDeclNode[] = [];
         for (const node of rawClassNodes) {
             const srcUri = (node as any)._sourceUri as string | undefined;
             if (srcUri) {
                 // Skip non-file entries (e.g. chat code blocks indexed by VS Code)
                 if (!srcUri.startsWith('file:')) continue;
-                if (seenSourceUris.has(srcUri)) continue;
-                seenSourceUris.add(srcUri);
+                const key = `${srcUri}:${node.start.line}:${node.start.character}`;
+                if (seenKeys.has(key)) continue;
+                seenKeys.add(key);
             }
             classNodes.push(node);
         }
