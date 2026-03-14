@@ -260,7 +260,10 @@ connection.onDidChangeWatchedFiles(async (params) => {
         console.log(`Re-indexed ${reindexedCount} externally changed file(s)`);
         // Re-validate all open documents since the index changed
         for (const doc of documents.all()) {
-            if (!analyser.isWorkspaceFile(doc.uri)) continue;
+            if (!analyser.isWorkspaceFile(doc.uri)) {
+                connection.sendDiagnostics({ uri: doc.uri, diagnostics: [] });
+                continue;
+            }
             const diagnostics = analyser.runDiagnostics(doc);
             connection.sendDiagnostics({ uri: doc.uri, diagnostics });
         }
@@ -272,6 +275,7 @@ connection.onNotification('enscript/revalidateOpenFiles', () => {
     const analyser = Analyzer.instance();
     for (const doc of documents.all()) {
         if (!analyser.isWorkspaceFile(doc.uri)) {
+            connection.sendDiagnostics({ uri: doc.uri, diagnostics: [] });
             continue;
         }
         const diagnostics = analyser.runDiagnostics(doc);

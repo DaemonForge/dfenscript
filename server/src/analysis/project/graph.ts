@@ -46,6 +46,52 @@ import { normalizeUri } from '../../util/uri';
 import { DiagnosticEngine } from '../diagnostics/engine';
 import * as url from 'node:url';
 
+/**
+ * Native engine constants (undocumented ints baked into the DayZ engine).
+ * These are not declared in any script file but are valid identifiers.
+ * Add new entries here as they are discovered.
+ */
+const NATIVE_ENGINE_CONSTANTS: readonly string[] = [
+    // Input action constants
+    'UAUIBack', 'UAAimRight', 'UAAimLeft', 'UALookAround', 'UAGetOver',
+    'UAMoveForward', 'UAMoveBack', 'UAReloadMagazine', 'UAUISelect',
+    'UATurbo', 'UAWalkRunTemp','UAGear','UAUIMenu','UADefaultAction',
+    'UATempRaiseWeapon','UAAction','UASwitchPreset', 'UAUICtrlX', 'UAUICtrlY',
+    'UAUICombine','UAUIRotateInventory','UAMapToggle','UAChat', 'UAGear',
+    'UAVoiceDistanceUp', 'UAVoiceDistanceDown','UAZoomInOptics', 'UALeanLeft',
+    'UALeanRight', 'UAZoomInOpticsControllerHelper', 'UAZoomOutOptics',
+    'UAZoomOutOpticsControllerHelper', 'UAAimDown', 'UAAimUp', 'UAToggleWeapons',
+    'UACarShiftGearUp', 'UACarShiftGearDown', 'UAUITabLeft', 'UAUITabRight',
+    'UAUIThumbRight','UAUIRight', 'UAUILeft','UAUIGesturesOpen', 
+    'UAUIQuickbarToggle','UAWalkRunForced','UAMoveRight', 'UAMoveLeft',
+    'UAUICopyDebugMonitorPos','UAPersonView','UAUICredits', 'UAUINextDown',
+    'UAUINextUp','UAUIUp','UAUIDown','UAUIGesturesOpen', 'UAUIQuickbarToggle',
+    'UAZeroingUp', 'UAZeroingDown', 'UANextActionCategory', 'UAPrevActionCategory',
+    'UANextAction', 'UAPrevAction', 'UAUIQuickbarRadialOpen',
+    //
+    'DT_CUSTOM', 'DBT_OK', 'DBB_NONE', 'DMT_INFO', 'CT_CLASS',
+    'DBT_YESNOCANCEL', 'DBB_YES', 'DBB_NO', 'DBB_CANCEL', 'CT_ARRAY',
+    'DMT_QUESTION', 'DBT_YESNO','DMT_EXCLAMATION',
+    //damageType
+    'DT_FIRE_ARM', 'DT_EXPLOSION','DT_CLOSE_COMBAT','DT_CUSTOM',
+    // Object intersection constants
+    'ObjIntersectFire', 'ObjIntersectView', 'ObjIntersectGeom',
+    'ObjIntersectIFire', 'ObjIntersectNone',
+    // Options constants
+    'OPTIONS_FIELD_OF_VIEW_MIN', 'OPTIONS_FIELD_OF_VIEW_MAX',
+    // Input device constants
+    'EUAINPUT_DEVICE_CONTROLLER', 'EUAINPUT_DEVICE_MOUSE', 'EUAINPUT_DEVICE_KEYBOARD',
+    'EUAINPUT_DEVICE_KEYBOARDMOUSE',
+    'LOCK_FROM_SCRIPT', 'HIDE_INV_FROM_SCRIPT', 
+    //Chat Channels
+    'CCSystem', 'CCAdmin', 'CCDirect', 'CCMegaphone', 'CCTransmitter', 
+    'CCPublicAddressSystem', 'CCBattlEye', 'ChatMaxUserLength',
+    'ChatMaxSystemLength',
+    'VoiceLevelShout', 'VoiceLevelWhisper', 'VoiceLevelTalk',
+    'VoiceEffectObstruction',
+    'MB_PRESSED_MASK',
+];
+
 interface SymbolEntry {
     name: string;
     kind: 'function' | 'class' | 'variable' | 'parameter' | 'field' | 'typedef' | 'enum';
@@ -2848,20 +2894,22 @@ export class Analyzer {
         visited.add(className);
         
         // Find all classes with this name (original + modded versions)
-        // Deduplicate by _sourceUri in case the same file was indexed under
-        // different URI casings (Windows path case-insensitivity).
-        // Also dedup by path suffix to handle the same file indexed from both
-        // the workspace and an include path under different full URIs.
+        // Deduplicate by (_sourceUri + start position) in case the same file was
+        // indexed under different URI casings (Windows path case-insensitivity).
+        // We include the start position (line:char) in the dedup key so that
+        // distinct class declarations in the SAME file (e.g., `class Foo` and
+        // `modded class Foo` in one file) are kept as separate entries.
         const rawClassNodes = this.findAllClassesByName(className);
-        const seenSourceUris = new Set<string>();
+        const seenKeys = new Set<string>();
         const classNodes: ClassDeclNode[] = [];
         for (const node of rawClassNodes) {
             const srcUri = (node as any)._sourceUri as string | undefined;
             if (srcUri) {
                 // Skip non-file entries (e.g. chat code blocks indexed by VS Code)
                 if (!srcUri.startsWith('file:')) continue;
-                if (seenSourceUris.has(srcUri)) continue;
-                seenSourceUris.add(srcUri);
+                const key = `${srcUri}:${node.start.line}:${node.start.character}`;
+                if (seenKeys.has(key)) continue;
+                seenKeys.add(key);
             }
             classNodes.push(node);
         }
@@ -3942,6 +3990,9 @@ export class Analyzer {
             
             // Check function call arguments (param count and types)
             this.checkFunctionCallArgs(doc, diags, text, lines, lineOffsets, ast, scopedVars);
+            
+            // Check access modifier violations (private/protected member access)
+            this.checkAccessModifierViolations(doc, diags, text, lines, lineOffsets, ast, scopedVars);
             
             // Check return statements: missing returns in non-void functions
             // and return type mismatches (including downcast warnings)
@@ -6156,9 +6207,16 @@ export class Analyzer {
                 // before the type name is '{', ';', or start-of-line, it's a declaration
                 const fullMatch = declCheck[0]; // includes trailing whitespace
                 // Skip if it looks like a declaration context (not preceded by = or , or ( )
-                const preDeclText = text.substring(Math.max(0, match.index - 80), match.index - fullMatch.length).trimEnd();
-                const lastChar = preDeclText[preDeclText.length - 1];
-                if (!lastChar || lastChar === '{' || lastChar === '}' || lastChar === ';' || lastChar === ')' || lastChar === '\n') {
+                const preDeclPos = match.index - fullMatch.length;
+                const preDeclText = text.substring(Math.max(0, preDeclPos - 80), preDeclPos);
+                const trimmed = preDeclText.trimEnd();
+                const lastChar = trimmed[trimmed.length - 1];
+                // Check if there's a newline between the end of preDeclText and the type name.
+                // This catches the case where the declaration starts on its own line
+                // (indentation after a comment line would trim away the newline otherwise).
+                const betweenContent = preDeclText.substring(trimmed.length);
+                const hasNewline = betweenContent.includes('\n');
+                if (!lastChar || lastChar === '{' || lastChar === '}' || lastChar === ';' || lastChar === ')' || hasNewline) {
                     continue; // It's a declaration, skip
                 }
             }
@@ -6402,6 +6460,211 @@ export class Analyzer {
                     range: { start: startPos, end: endPos },
                     severity: result.severity === 'error' ? DiagnosticSeverity.Error : DiagnosticSeverity.Warning
                 });
+            }
+        }
+    }
+
+    /**
+     * Check for access modifier violations (private/protected member access).
+     * Scans function bodies for `obj.member` patterns and verifies that the
+     * accessed member's visibility permits the access from the current context.
+     * 
+     * Rules (matching DayZ Enforce Script engine):
+     *   - private: only accessible within the declaring class
+     *   - protected: accessible within the declaring class and subclasses
+     *   - public / no modifier: accessible from anywhere
+     */
+    private checkAccessModifierViolations(
+        doc: TextDocument,
+        diags: Diagnostic[],
+        text: string,
+        lines: string[],
+        lineOffsets: number[],
+        ast: File,
+        scopedVars: Map<string, { type: string; startLine: number; endLine: number; isClassField: boolean }[]>
+    ): void {
+        // Variable type lookup (same helper used by other checkers)
+        const getVarTypeAtLine = (name: string, line: number): string | undefined => {
+            const entries = scopedVars.get(name);
+            if (entries) {
+                let best: { type: string; startLine: number; endLine: number } | undefined;
+                for (const e of entries) {
+                    if (line >= e.startLine && line <= e.endLine) {
+                        if (!best || (e.endLine - e.startLine) < (best.endLine - best.startLine)) {
+                            best = e;
+                        }
+                    }
+                }
+                if (best) return best.type;
+            }
+            const pos: Position = { line, character: 0 };
+            return this.resolveVariableType(doc, pos, name) ?? undefined;
+        };
+
+        // Helper: check access and push diagnostic if violated
+        const checkAccess = (
+            memberNode: SymbolNodeBase,
+            memberName: string,
+            declaringClassName: string,
+            containingClassName: string | null,
+            memberStart: number,
+            kind: 'Variable' | 'Method'
+        ): void => {
+            const isPrivate = memberNode.modifiers?.includes('private');
+            const isProtected = memberNode.modifiers?.includes('protected');
+            if (!isPrivate && !isProtected) return;
+
+            if (isPrivate) {
+                if (containingClassName !== declaringClassName) {
+                    const startPos = doc.positionAt(memberStart);
+                    const endPos = doc.positionAt(memberStart + memberName.length);
+                    diags.push({
+                        message: `${kind} '${memberName}' is private and cannot be accessed from '${containingClassName || 'global scope'}'`,
+                        range: { start: startPos, end: endPos },
+                        severity: DiagnosticSeverity.Error
+                    });
+                }
+            } else if (isProtected) {
+                if (!containingClassName) {
+                    const startPos = doc.positionAt(memberStart);
+                    const endPos = doc.positionAt(memberStart + memberName.length);
+                    diags.push({
+                        message: `${kind} '${memberName}' is protected and cannot be accessed from global scope`,
+                        range: { start: startPos, end: endPos },
+                        severity: DiagnosticSeverity.Error
+                    });
+                } else if (containingClassName !== declaringClassName) {
+                    const currentHierarchy = this.getClassHierarchyOrdered(containingClassName, new Set());
+                    const isSubclass = currentHierarchy.some(cls => cls.name === declaringClassName);
+                    if (!isSubclass) {
+                        const startPos = doc.positionAt(memberStart);
+                        const endPos = doc.positionAt(memberStart + memberName.length);
+                        diags.push({
+                            message: `${kind} '${memberName}' is protected and cannot be accessed from '${containingClassName}'`,
+                            range: { start: startPos, end: endPos },
+                            severity: DiagnosticSeverity.Error
+                        });
+                    }
+                }
+            }
+        };
+
+        // Helper: find a member and its declaring class in a type hierarchy
+        const findMemberInHierarchy = (typeName: string, memberName: string): { node: SymbolNodeBase; declaringClass: string } | null => {
+            const hierarchy = this.getClassHierarchyOrdered(typeName, new Set());
+            for (const cls of hierarchy) {
+                for (const member of cls.members || []) {
+                    if (member.name === memberName) {
+                        return { node: member, declaringClass: cls.name };
+                    }
+                }
+            }
+            return null;
+        };
+
+        // ── 1. Qualified access: obj.member and obj.Method() ──────────────
+        // Match obj.member (both field access and method calls)
+        const memberAccessPattern = /\b(\w+)\s*\.\s*(\w+)\b/g;
+        let match: RegExpExecArray | null;
+
+        while ((match = memberAccessPattern.exec(text)) !== null) {
+            if (Analyzer.isInsideCommentOrStringAt(text, match.index)) continue;
+
+            const objName = match[1];
+            const memberName = match[2];
+            const memberStart = match.index + match[0].indexOf(memberName);
+            const lineNum = Analyzer.getLineFromOffset(lineOffsets, match.index);
+            const containingClass = this.findContainingClass(ast, { line: lineNum, character: 0 });
+            const containingClassName = containingClass?.name ?? null;
+
+            if (objName === 'this' || objName === 'super') continue;
+
+            let objType: string | undefined;
+            objType = getVarTypeAtLine(objName, lineNum);
+            if (objType) {
+                objType = this.resolveTypedef(objType);
+            }
+            if (!objType && objName[0] === objName[0].toUpperCase() && this.classIndex.has(objName)) {
+                objType = objName;
+            }
+            if (!objType) continue;
+
+            const found = findMemberInHierarchy(objType, memberName);
+            if (!found) continue;
+
+            const isMethod = found.node.kind === 'FunctionDecl';
+            checkAccess(found.node, memberName, found.declaringClass, containingClassName, memberStart, isMethod ? 'Method' : 'Variable');
+        }
+
+        // ── 2. Unqualified access to inherited private/protected members ──
+        // Inside a class method, accessing InheritedMethod() or inherited
+        // fields without qualifier still needs to respect their access level.
+        for (const node of ast.body) {
+            if (node.kind !== 'ClassDecl') continue;
+            const classNode = node as ClassDeclNode;
+
+            // Collect own member names (fields + methods defined in THIS class)
+            const ownMembers = new Set<string>();
+            for (const m of classNode.members || []) {
+                if (m.name) ownMembers.add(m.name);
+            }
+
+            for (const member of classNode.members || []) {
+                if (member.kind !== 'FunctionDecl') continue;
+                const func = member as FunctionDeclNode;
+                if (!func.hasBody) continue;
+
+                // Check unqualified method calls: FuncName(
+                const funcStartOffset = doc.offsetAt(func.start);
+                const funcEndOffset = doc.offsetAt(func.end);
+                const bodyText = text.substring(funcStartOffset, funcEndOffset);
+                const callPattern = /\b(\w+)\s*\(/g;
+                let callMatch: RegExpExecArray | null;
+
+                while ((callMatch = callPattern.exec(bodyText)) !== null) {
+                    const callName = callMatch[1];
+                    const absOffset = funcStartOffset + callMatch.index;
+                    if (Analyzer.isInsideCommentOrStringAt(text, absOffset)) continue;
+
+                    // Skip if preceded by '.' or '::' (qualified call — handled above)
+                    const charBefore = absOffset > 0 ? text[absOffset - 1] : '';
+                    if (charBefore === '.') continue;
+                    if (absOffset > 1 && text[absOffset - 2] === ':' && text[absOffset - 1] === ':') continue;
+
+                    // Skip if this is a member defined in the current class itself
+                    if (ownMembers.has(callName)) continue;
+
+                    // Skip keywords / built-ins
+                    if (keywords.has(callName)) continue;
+
+                    // Check if this is an inherited method with access restrictions
+                    const found = findMemberInHierarchy(classNode.name, callName);
+                    if (!found || found.node.kind !== 'FunctionDecl') continue;
+
+                    checkAccess(found.node, callName, found.declaringClass, classNode.name, absOffset, 'Method');
+                }
+
+                // Check unqualified field references via bodyIdentifierRefs
+                if (func.bodyIdentifierRefs) {
+                    // Build set of locals + params that shadow inherited names
+                    const localNames = new Set<string>();
+                    for (const p of func.parameters || []) { if (p.name) localNames.add(p.name); }
+                    for (const l of func.locals || []) { if (l.name) localNames.add(l.name); }
+
+                    for (const ref of func.bodyIdentifierRefs) {
+                        // Skip if it's an own member of this class
+                        if (ownMembers.has(ref.name)) continue;
+
+                        // Skip if shadowed by a local variable or parameter
+                        if (localNames.has(ref.name)) continue;
+
+                        // Check if this is an inherited field with access restrictions
+                        const found = findMemberInHierarchy(classNode.name, ref.name);
+                        if (!found || found.node.kind !== 'VarDecl') continue;
+
+                        checkAccess(found.node, ref.name, found.declaringClass, classNode.name, doc.offsetAt(ref.start), 'Variable');
+                    }
+                }
             }
         }
     }
@@ -6787,6 +7050,130 @@ export class Analyzer {
             }
         };
         
+        // Check a body type ref (static call target like ClassName.Method()).
+        // Only produces cross-module errors — never "Unknown type" warnings,
+        // because uppercase identifiers followed by '.' can also be variables
+        // (e.g., ServerURL.Length()), not just class names.
+        const checkBodyTypeRef = (type: TypeNode | undefined): void => {
+            if (!type || currentModule <= 0) return;
+            
+            // Only check if this identifier actually resolves to a known class/enum
+            if (!this.findClassByName(type.identifier) && !this.findEnumByName(type.identifier)) return;
+            
+            const typeModule = this.getModuleForSymbol(type.identifier);
+            if (typeModule > 0 && typeModule > currentModule) {
+                diags.push({
+                    message: `Type '${type.identifier}' is defined in ${MODULE_NAMES[typeModule] || 'module ' + typeModule} and cannot be used from ${MODULE_NAMES[currentModule] || 'module ' + currentModule}. Higher-numbered modules are not visible to lower-numbered modules.`,
+                    range: { start: type.start, end: type.end },
+                    severity: DiagnosticSeverity.Error
+                });
+            }
+        };
+        
+        // Built-in identifiers that are always valid in expressions
+        const builtinIdentifiers = new Set([
+            'null', 'NULL', 'true', 'false', 'this', 'super',
+            'typename', 'string', 'int', 'float', 'bool', 'vector',
+            'auto', 'void', 'array', 'set', 'map',
+            ...NATIVE_ENGINE_CONSTANTS,
+        ]);
+        
+        // Pre-collect all enum member names for fast lookup
+        const allEnumMembers = new Set<string>();
+        for (const [, enumNode] of this.enumIndex) {
+            for (const member of enumNode.members || []) {
+                if (member.name) allEnumMembers.add(member.name);
+            }
+        }
+        // Also include enum members from the current file's AST (in case not yet indexed)
+        for (const node of ast.body) {
+            if (node.kind === 'EnumDecl') {
+                for (const member of (node as EnumDeclNode).members || []) {
+                    if (member.name) allEnumMembers.add(member.name);
+                }
+            }
+        }
+        
+        // Check whether an identifier used in a function body resolves to a known symbol.
+        // containingClassName is set when the function is a class method.
+        const checkBodyIdentifierRefs = (func: FunctionDeclNode, containingClassName: string | null): void => {
+            if (!func.bodyIdentifierRefs || func.bodyIdentifierRefs.length === 0) return;
+            
+            // Build a set of locally-visible names for this function
+            const localNames = new Set<string>();
+            
+            // Parameters
+            for (const param of func.parameters || []) {
+                if (param.name) localNames.add(param.name);
+            }
+            // Locals
+            for (const local of func.locals || []) {
+                if (local.name) localNames.add(local.name);
+            }
+            
+            // Class members (own + inherited) if inside a class
+            if (containingClassName) {
+                const hierarchy = this.getClassHierarchyOrdered(containingClassName, new Set());
+                for (const cls of hierarchy) {
+                    for (const member of cls.members || []) {
+                        if (member.name) localNames.add(member.name);
+                    }
+                }
+            }
+            
+            for (const ref of func.bodyIdentifierRefs) {
+                const name = ref.name;
+                
+                // Skip built-ins and primitives
+                if (builtinIdentifiers.has(name)) continue;
+                if (primitives.has(name)) continue;
+                if (genericParams.has(name)) continue;
+                
+                // Skip if it's a locally visible name
+                if (localNames.has(name)) continue;
+                
+                // Skip if it's a known enum member (bare access is valid in Enforce Script)
+                if (allEnumMembers.has(name)) continue;
+                
+                // Skip if it's a known class, enum, or function name
+                if (this.findClassByName(name)) continue;
+                if (this.findEnumByName(name)) continue;
+                if (this.functionIndex.has(name)) continue;
+                
+                // Skip if it's in the global symbol index
+                if (this.globalSymbolIndex.has(name)) continue;
+                
+                // Skip if it matches any top-level name in any cached file
+                let foundInCache = false;
+                for (const [, fileAst] of this.docCache) {
+                    for (const node of fileAst.body) {
+                        if (node.name === name) {
+                            foundInCache = true;
+                            break;
+                        }
+                    }
+                    if (foundInCache) break;
+                }
+                if (foundInCache) continue;
+                
+                // Also check current file's AST
+                let foundInCurrentFile = false;
+                for (const node of ast.body) {
+                    if (node.name === name) {
+                        foundInCurrentFile = true;
+                        break;
+                    }
+                }
+                if (foundInCurrentFile) continue;
+                
+                diags.push({
+                    message: `Unknown identifier '${name}'`,
+                    range: { start: ref.start, end: ref.end },
+                    severity: DiagnosticSeverity.Warning
+                });
+            }
+        };
+        
         // Walk the AST
         for (const node of ast.body) {
             // Check class declarations
@@ -6824,6 +7211,12 @@ export class Analyzer {
                         for (const local of func.locals || []) {
                             checkType(local.type);
                         }
+                        // Check static call targets (e.g., ClassName.Method()) in body
+                        for (const ref of func.bodyTypeRefs || []) {
+                            checkBodyTypeRef(ref);
+                        }
+                        // Check unknown identifiers in body expressions
+                        checkBodyIdentifierRefs(func, classNode.name);
                     }
                 }
             }
@@ -6843,6 +7236,12 @@ export class Analyzer {
                 for (const local of func.locals || []) {
                     checkType(local.type);
                 }
+                // Check static call targets (e.g., ClassName.Method()) in body
+                for (const ref of func.bodyTypeRefs || []) {
+                    checkBodyTypeRef(ref);
+                }
+                // Check unknown identifiers in body expressions
+                checkBodyIdentifierRefs(func, null);
             }
         }
 

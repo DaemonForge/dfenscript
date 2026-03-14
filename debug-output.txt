@@ -1,0 +1,5 @@
+[SERVER STARTED] 2026-03-13T17:49:03.438Z
+[runDiagnostics] uri=file:///p%3A/scripts/5_mission/mission/missiongameplay.c
+[runDiagnostics] uri=file:///p%3A/scripts/5_mission/mission/missiongameplay.c
+[runDiagnostics] uri=file:///p%3A/scripts/5_mission/mission/missiongameplay.c
+[checkUnknownSymbols] uri=undefined docCache.size=2904

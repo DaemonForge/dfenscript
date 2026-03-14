@@ -21,7 +21,7 @@ export const keywords = new Set([
   // Class/type declaration keywords
   'class', 'enum', 'typedef', 'using', 'extends',
   // Modifiers
-  'modded', 'proto', 'native', 'owned', 'local', 'auto', 'event',
+  'modded', 'proto', 'native', 'owned', 'local', 'auto', 'event', 'thread',
   'ref', 'reference', 'out', 'inout',
   'override', 'private', 'protected', 'public', 'static', 'const',
   'notnull', 'external', 'volatile', 'autoptr',
