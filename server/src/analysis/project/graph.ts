@@ -89,7 +89,7 @@ const NATIVE_ENGINE_CONSTANTS: readonly string[] = [
     'ChatMaxSystemLength',
     'VoiceLevelShout', 'VoiceLevelWhisper', 'VoiceLevelTalk',
     'VoiceEffectObstruction',
-    'MB_PRESSED_MASK',
+    'MB_PRESSED_MASK', 'FrameWidgetTypeID',
 ];
 
 interface SymbolEntry {
