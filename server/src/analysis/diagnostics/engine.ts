@@ -1,6 +1,6 @@
 import { Diagnostic, DiagnosticSeverity } from 'vscode-languageserver';
 import { DiagnosticRule, RuleContext } from './rules';
-import { File, ClassDeclNode, FunctionDeclNode } from '../ast/parser';
+import { File, ClassDeclNode, FunctionDeclNode, VarDeclNode } from '../ast/parser';
 
 /**
  * Pluggable Diagnostic Rule Engine
@@ -19,6 +19,7 @@ export class DiagnosticEngine {
     constructor() {
         // Register built-in rules
         this.register(new ConflictingModifiersRule());
+        this.register(new StrongRefParameterRule());
     }
 
     /** Register a new diagnostic rule */
@@ -96,6 +97,53 @@ class ConflictingModifiersRule implements DiagnosticRule {
             }
         }
         
+        return diags;
+    }
+}
+
+/**
+ * ES004: Strong Reference Parameter
+ * Detects method parameters declared with 'autoptr' or 'ref', which create
+ * strong references. Method arguments cannot be strong references in
+ * Enforce Script — remove the modifier.
+ */
+class StrongRefParameterRule implements DiagnosticRule {
+    id = 'ES004';
+    name = 'Strong Reference Parameter';
+    severity = DiagnosticSeverity.Warning;
+
+    private static readonly STRONG_REF_MODIFIERS = ['autoptr', 'ref'];
+
+    check(ast: File, _context: RuleContext): Diagnostic[] {
+        const diags: Diagnostic[] = [];
+
+        const checkParams = (func: FunctionDeclNode) => {
+            for (const param of func.parameters) {
+                for (const mod of StrongRefParameterRule.STRONG_REF_MODIFIERS) {
+                    if (param.modifiers?.includes(mod)) {
+                        diags.push({
+                            message: `Method argument '${param.name}' can't be a strong reference. Remove '${mod}' from the parameter.`,
+                            range: { start: param.nameStart, end: param.nameEnd },
+                            severity: this.severity
+                        });
+                    }
+                }
+            }
+        };
+
+        for (const node of ast.body) {
+            if (node.kind === 'ClassDecl') {
+                const cls = node as ClassDeclNode;
+                for (const member of cls.members || []) {
+                    if (member.kind === 'FunctionDecl') {
+                        checkParams(member as FunctionDeclNode);
+                    }
+                }
+            } else if (node.kind === 'FunctionDecl') {
+                checkParams(node as FunctionDeclNode);
+            }
+        }
+
         return diags;
     }
 }
